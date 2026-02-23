@@ -6,7 +6,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/codecrafters-io/bittorrent-starter-go/internal/bencode"
+	"github.com/leorafaelmb/BitTorrent-Client/internal/bencode"
 )
 
 type MagnetLink struct {
@@ -77,7 +77,6 @@ func ParseMetadataPiece(payload []byte) (*MetadataPiece, error) {
 
 	// Extract the actual metadata data (everything after the bencoded dict)
 	data := bencodedPart[dictEnd:]
-
 	return &MetadataPiece{
 		Piece:     piece,
 		TotalSize: totalSize,

@@ -9,30 +9,32 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/codecrafters-io/bittorrent-starter-go/internal"
-	"github.com/codecrafters-io/bittorrent-starter-go/internal/bencode"
-	"github.com/codecrafters-io/bittorrent-starter-go/internal/metainfo"
+	"github.com/leorafaelmb/BitTorrent-Client/internal"
+	"github.com/leorafaelmb/BitTorrent-Client/internal/bencode"
+	"github.com/leorafaelmb/BitTorrent-Client/internal/metainfo"
 )
 
 // Peer represents a network connection to another BitTorrent client.
 type Peer struct {
-	AddrPort *netip.AddrPort
+	AddrPort netip.AddrPort
 	ID       [20]byte
 
 	Conn   net.Conn
 	Choked bool
 
-	Bitfield BitField
+	BitField BitField
 }
-
-// BitField is a compact representation of which pieces a peer has.
-type BitField []byte
 
 // PeerMessage represents a message sent between peers after the handshake
 type PeerMessage struct {
 	Length  uint32
 	ID      byte
 	Payload []byte
+}
+
+// IsKeepAlive returns true if this is a keep-alive message (length 0).
+func (m *PeerMessage) IsKeepAlive() bool {
+	return m.Length == 0
 }
 
 // Connect establishes a TCP connection to the peer
@@ -43,115 +45,6 @@ func (p *Peer) Connect() error {
 	}
 	p.Conn = conn
 	return nil
-}
-
-// Handshake performs the BitTorrent handshake with a peer.
-func (p *Peer) Handshake(infoHash [20]byte, ext bool) (*Handshake, error) {
-	c := p.Conn
-	message, err := constructHandshakeMessage(infoHash, ext)
-	if err != nil {
-		return nil, fmt.Errorf("error constructing peer handshake message: %w", err)
-	}
-	_, err = c.Write(message)
-	if err != nil {
-		return nil, fmt.Errorf("error writing peer handshake message to connection: %w", err)
-	}
-	h, err := readHandshake(p.Conn)
-	if err != nil {
-		return nil, err
-	}
-	if infoHash != h.InfoHash {
-		return h, fmt.Errorf("handshake info hash does not match torrent info hash: %w", err)
-
-	}
-
-	copy(p.ID[:], h.PeerID[:])
-
-	return h, nil
-}
-
-func (p *Peer) MagnetHandshake(infoHash [20]byte) (*Handshake, error) {
-	c := p.Conn
-	message := constructMagnetHandshakeMessage(infoHash)
-
-	_, err := c.Write(message)
-	if err != nil {
-		return nil, fmt.Errorf("error writing magnet handshake message: %w", err)
-	}
-
-	h, err := readHandshake(p.Conn)
-	if err != nil {
-		return nil, err
-	}
-
-	if !bytes.Equal(infoHash[:], h.InfoHash[:]) {
-		return nil, fmt.Errorf("handshake info hash mismatch")
-	}
-
-	copy(p.ID[:], h.PeerID[:])
-
-	// Check if peer supports extension protocol
-	if h.Reserved[internal.ExtensionBitPosition]&internal.ExtensionID == 0 {
-		return nil, fmt.Errorf("peer does not support extension protocol")
-	}
-
-	return h, nil
-}
-
-func (p *Peer) ExtensionHandshake() (*ExtensionHandshakeResponse, error) {
-	payload := append([]byte{0}, []byte("d1:md11:ut_metadatai1eee")...)
-
-	// Message ID 20 for extension protocol
-	msg, err := p.SendMessage(20, payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to send extension handshake: %w", err)
-	}
-
-	if msg.ID != internal.MessageExtension {
-		return nil, fmt.Errorf("expected extension message (20), got %d", msg.ID)
-	}
-
-	return parseExtensionHandshake(msg.Payload)
-}
-
-// readHandshake reads and parses a handshake message from the connection
-func readHandshake(conn net.Conn) (*Handshake, error) {
-	buf := make([]byte, 68)
-	_, err := io.ReadFull(conn, buf)
-	if err != nil {
-		return nil, fmt.Errorf("error reading handshake response: %w", err)
-	}
-
-	h := &Handshake{}
-	r := bytes.NewReader(buf)
-
-	h.PstrLen, err = r.ReadByte()
-	if err != nil {
-		return nil, err
-	}
-
-	if _, err = io.ReadFull(r, h.Pstr[:]); err != nil {
-		return nil, err
-	}
-
-	if _, err = io.ReadFull(r, h.Reserved[:]); err != nil {
-		return nil, err
-	}
-
-	if _, err = io.ReadFull(r, h.InfoHash[:]); err != nil {
-		return nil, err
-	}
-
-	if _, err = io.ReadFull(r, h.PeerID[:]); err != nil {
-		return nil, err
-	}
-
-	// Validate handshake message
-	if h.PstrLen != internal.ProtocolStringLength || string(h.Pstr[:]) != internal.ProtocolString {
-		fmt.Println(string(h.Pstr[:]))
-		err = fmt.Errorf("invalid handshake: %w", err)
-	}
-	return h, err
 }
 
 // SendMessage sends a message to the peer and waits for a response.
@@ -176,36 +69,28 @@ func (p *Peer) SendMessage(messageID byte, payload []byte) (*PeerMessage, error)
 // ReadMessage reads one complete message from the peer.
 // Blocks until a full message is received.
 func (p *Peer) ReadMessage() (*PeerMessage, error) {
-	var err error
 	lenBytes := make([]byte, 4)
-	if _, err = io.ReadFull(p.Conn, lenBytes); err != nil {
+	if _, err := io.ReadFull(p.Conn, lenBytes); err != nil {
 		return nil, fmt.Errorf("error reading length of peer message: %w", err)
 	}
 
 	length := binary.BigEndian.Uint32(lenBytes)
+
+	// Keep-alive message (length 0)
+	if length == 0 {
+		return &PeerMessage{Length: 0}, nil
+	}
+
 	buf := make([]byte, length)
-	r := bytes.NewReader(buf)
-
-	_, err = io.ReadFull(p.Conn, buf)
-	if err != nil {
+	if _, err := io.ReadFull(p.Conn, buf); err != nil {
 		return nil, fmt.Errorf("error reading data stream into buffer: %w", err)
-	}
-	id, err := r.ReadByte()
-	if err != nil {
-		return nil, fmt.Errorf("error reading message ID of peer message: %w", err)
-	}
-
-	payload := make([]byte, length-1)
-	if _, err = io.ReadFull(r, payload); err != nil {
-		return nil, fmt.Errorf("error reading payload of peer message: %w", err)
 	}
 
 	return &PeerMessage{
 		Length:  length,
-		ID:      id,
-		Payload: payload,
-	}, err
-
+		ID:      buf[0],
+		Payload: buf[1:],
+	}, nil
 }
 
 // ReadBitfield reads and stores the peer's bitfield message.
@@ -218,14 +103,60 @@ func (p *Peer) ReadBitfield() (*PeerMessage, error) {
 		return msg, fmt.Errorf("expected bitfield (5), got %d", msg.ID)
 	}
 
-	p.Bitfield = msg.Payload
+	p.BitField = msg.Payload
 
 	return msg, nil
 }
 
-// SendInterested sends a message to the peer communicating we're interested in downloading from them
-func (p *Peer) SendInterested() (*PeerMessage, error) {
-	return p.SendMessage(2, nil)
+// SendOnly sends a message without reading a response.
+func (p *Peer) SendOnly(messageID byte, payload []byte) error {
+	length := uint32(len(payload) + 1)
+	message := make([]byte, 4+length)
+	binary.BigEndian.PutUint32(message[0:4], length)
+	message[4] = messageID
+	copy(message[5:], payload)
+	_, err := p.Conn.Write(message)
+	return err
+}
+
+// SendInterested sends an interested message to the peer.
+func (p *Peer) SendInterested() error {
+	return p.SendOnly(internal.MessageInterested, nil)
+}
+
+// SendNotInterested sends a not-interested message to the peer.
+func (p *Peer) SendNotInterested() error {
+	return p.SendOnly(internal.MessageNotInterested, nil)
+}
+
+// WaitForUnchoke reads messages until an Unchoke is received.
+// Processes Have, KeepAlive, and other messages encountered along the way.
+func (p *Peer) WaitForUnchoke() error {
+	for {
+		msg, err := p.ReadMessage()
+		if err != nil {
+			return fmt.Errorf("error waiting for unchoke: %w", err)
+		}
+
+		if msg.IsKeepAlive() {
+			continue
+		}
+
+		switch msg.ID {
+		case internal.MessageUnchoke:
+			p.Choked = false
+			return nil
+		case internal.MessageChoke:
+			p.Choked = true
+		case internal.MessageHave:
+			if len(msg.Payload) >= 4 {
+				idx := int(binary.BigEndian.Uint32(msg.Payload[0:4]))
+				p.BitField.SetPiece(idx)
+			}
+		case internal.MessageBitfield:
+			p.BitField = msg.Payload
+		}
+	}
 }
 
 // SendRequest requests a specific block from a piece.
@@ -278,8 +209,7 @@ func (p *Peer) sendRequestOnly(index, begin, length uint32) error {
 }
 
 // getBlocks downloads multiple blocks using TCP pipelining.
-// Pipelining allows us to send up to MaxPipelineRequests without waiting,
-// keeping the connection busy and dramatically improving download speed.
+// Handles interleaved Choke, Have, KeepAlive, and Unchoke messages.
 func (p *Peer) getBlocks(requests []BlockRequest) ([][]byte, error) {
 	numBlocks := len(requests)
 	blocks := make([][]byte, numBlocks)
@@ -296,21 +226,40 @@ func (p *Peer) getBlocks(requests []BlockRequest) ([][]byte, error) {
 			}
 			requested++
 		}
+
 		msg, err := p.ReadMessage()
 		if err != nil {
 			return nil, fmt.Errorf("error reading message for block %d: %w", received, err)
 		}
-		if msg.ID != internal.MessagePiece {
-			return nil, fmt.Errorf("expected piece message (7), got %d", msg.ID)
+
+		if msg.IsKeepAlive() {
+			continue
 		}
 
-		if len(msg.Payload) < 8 {
-			return nil, fmt.Errorf("piece message payload too short: %d bytes", len(msg.Payload))
-		}
+		switch msg.ID {
+		case internal.MessagePiece:
+			if len(msg.Payload) < 8 {
+				return nil, fmt.Errorf("piece message payload too short: %d bytes", len(msg.Payload))
+			}
+			blocks[received] = msg.Payload[8:]
+			received++
 
-		blockData := msg.Payload[8:]
-		blocks[received] = blockData
-		received++
+		case internal.MessageChoke:
+			p.Choked = true
+			return nil, ErrChoked
+
+		case internal.MessageUnchoke:
+			p.Choked = false
+
+		case internal.MessageHave:
+			if len(msg.Payload) >= 4 {
+				idx := int(binary.BigEndian.Uint32(msg.Payload[0:4]))
+				p.BitField.SetPiece(idx)
+			}
+
+		default:
+			// Ignore unknown messages
+		}
 	}
 	return blocks, nil
 }
@@ -432,16 +381,6 @@ func (p *Peer) ParseBitfield(msg *PeerMessage) error {
 	if msg.ID != internal.MessageBitfield {
 		return fmt.Errorf("expected bitfield message (id 5), got id %d", msg.ID)
 	}
-	p.Bitfield = msg.Payload
+	p.BitField = msg.Payload
 	return nil
-}
-
-func (bf BitField) HasPiece(index int) bool {
-	byteIndex := index / 8
-	offset := index % 8
-	if byteIndex < 0 || byteIndex >= len(bf) {
-		return false
-	}
-	// Check if the bit is set (bits are ordered from most significant to least)
-	return bf[byteIndex]>>(7-offset)&1 != 0
 }

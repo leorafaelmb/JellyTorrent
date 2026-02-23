@@ -13,8 +13,10 @@ func Decode(bencoded []byte) (interface{}, error) {
 	return result, err
 }
 
-// DecodeAt is the internal recursive decoder that processes bencoded data
-// Returns string, int, []interace{}, map[string]interface{}, or []byte depending on input
+// DecodeAt is the internal recursive decoder that processes bencoded data.
+// The first field returns string, int, []interace{}, map[string]interface{}, or []byte depending on input;
+// second returns the ending delimiter (e) of the bencoded structure that has been decoded;
+// third returns any error that came up during decoding.
 func DecodeAt(bencoded []byte, index int) (interface{}, int, error) {
 	identifier := rune(bencoded[index])
 	if unicode.IsDigit(identifier) {
@@ -142,7 +144,7 @@ func decodeList(bencoded []byte, index int) ([]interface{}, int, error) {
 
 // decodeDict decodes a bencoded dictionary of format: d<key1><val1><key2><val2>...e
 // Keys must be strings and are sorted in lexicographical order.
-// Returns a map with string keys and mixed-type values.
+// Returns a map with string keys and mixed-type values (string, int, list, dict).
 func decodeDict(bencoded []byte, index int) (map[string]interface{}, int, error) {
 	decodedDict := make(map[string]interface{})
 	i := index + 1

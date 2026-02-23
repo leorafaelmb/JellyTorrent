@@ -1,14 +1,16 @@
-// internal/downloader/worker.go
 package downloader
 
 import (
 	"context"
+	"encoding/binary"
+	"errors"
 	"fmt"
+	"net"
 	"time"
 
-	"github.com/codecrafters-io/bittorrent-starter-go/internal"
-	"github.com/codecrafters-io/bittorrent-starter-go/internal/metainfo"
-	"github.com/codecrafters-io/bittorrent-starter-go/internal/peer"
+	"github.com/leorafaelmb/BitTorrent-Client/internal"
+	"github.com/leorafaelmb/BitTorrent-Client/internal/metainfo"
+	"github.com/leorafaelmb/BitTorrent-Client/internal/peer"
 )
 
 // Worker handles downloading pieces from a single peer
@@ -32,25 +34,23 @@ func NewWorker(p *peer.Peer, t *metainfo.TorrentFile, cfg Config) *Worker {
 }
 
 // Run executes the worker's download loop
-func (w *Worker) Run(ctx context.Context, workQueue <-chan *PieceWork, results chan<- *PieceResult, errors chan<- *WorkerError) error {
-	// Connect to peer
+func (w *Worker) Run(ctx context.Context, pm *PieceManager, results chan<- *PieceResult) error {
 	if err := w.connect(ctx); err != nil {
 		return err
 	}
-	defer w.peer.Conn.Close()
+	defer w.cleanup(pm)
 
-	// Setup connection
 	if err := w.setup(); err != nil {
 		return err
 	}
 
-	// Download pieces
-	return w.downloadLoop(ctx, workQueue, results, errors)
+	pm.AddAvailability(w.peer.BitField)
+
+	return w.pieceLoop(ctx, pm, results)
 }
 
 // connect establishes connection to the peer
 func (w *Worker) connect(ctx context.Context) error {
-	// Check context before connecting
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -70,7 +70,6 @@ func (w *Worker) connect(ctx context.Context) error {
 
 // setup performs handshake and initial protocol exchange
 func (w *Worker) setup() error {
-	// Handshake
 	_, err := w.peer.Handshake(w.torrent.Info.InfoHash, false)
 	if err != nil {
 		return &WorkerError{
@@ -80,7 +79,6 @@ func (w *Worker) setup() error {
 		}
 	}
 
-	// Read bitfield
 	_, err = w.peer.ReadBitfield()
 	if err != nil {
 		return &WorkerError{
@@ -90,9 +88,7 @@ func (w *Worker) setup() error {
 		}
 	}
 
-	// Send interested
-	msg, err := w.peer.SendInterested()
-	if err != nil {
+	if err = w.peer.SendInterested(); err != nil {
 		return &WorkerError{
 			PeerAddr: w.peer.AddrPort.String(),
 			Phase:    "interested",
@@ -100,106 +96,156 @@ func (w *Worker) setup() error {
 		}
 	}
 
-	// Wait for unchoke
-	if msg.ID != internal.MessageUnchoke {
+	if err = w.peer.WaitForUnchoke(); err != nil {
 		return &WorkerError{
 			PeerAddr: w.peer.AddrPort.String(),
 			Phase:    "unchoke",
-			Err:      fmt.Errorf("expected unchoke (1), got %d", msg.ID),
+			Err:      err,
 		}
 	}
 
 	return nil
 }
 
-// downloadLoop processes work items from the queue
-func (w *Worker) downloadLoop(ctx context.Context, workQueue <-chan *PieceWork,
-	results chan<- *PieceResult, errors chan<- *WorkerError) error {
+// pieceLoop requests and downloads pieces from the peer
+func (w *Worker) pieceLoop(ctx context.Context, pm *PieceManager, results chan<- *PieceResult) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-pm.Done():
+			return nil
+		default:
+		}
 
-		case work, ok := <-workQueue:
-			if !ok {
-				// Queue closed, we're done
-				if w.config.Verbose {
-					fmt.Printf("Worker %s: attempted=%d, downloaded=%d, failed=%d\n",
-						w.peer.AddrPort.String(), w.attempted, w.downloaded, w.failed)
-				}
+		info, ok := pm.Assign(w.peer.AddrPort.String(), w.peer.BitField)
+		if !ok {
+			if pm.IsFinished() {
 				return nil
 			}
-
-			w.attempted++
-
-			// Check if peer has this piece
-			if !w.peer.Bitfield.HasPiece(work.Index) {
-				continue // Skip pieces this peer doesn't have
+			if err := w.waitForNewPieces(ctx, pm); err != nil {
+				return err
 			}
+			continue
+		}
 
-			// Download the piece with retries
-			piece, err := w.downloadPieceWithRetry(ctx, work)
-			if err != nil {
-				w.failed++
-				errors <- &WorkerError{
-					PeerAddr: w.peer.AddrPort.String(),
-					Phase:    "download",
-					Err:      fmt.Errorf("piece %d: %w", work.Index, err),
+		w.attempted++
+
+		piece, err := w.peer.GetPiece(info.Hash, info.Length, uint32(info.Index))
+		if err != nil {
+			pm.Release(info.Index)
+
+			if errors.Is(err, peer.ErrChoked) {
+				if w.config.Verbose {
+					fmt.Printf("Worker %s: choked during piece %d, waiting for unchoke\n",
+						w.peer.AddrPort.String(), info.Index)
+				}
+				if err := w.peer.WaitForUnchoke(); err != nil {
+					return &WorkerError{
+						PeerAddr: w.peer.AddrPort.String(),
+						Phase:    "unchoke-recovery",
+						Err:      err,
+					}
 				}
 				continue
 			}
 
-			// Send result
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case results <- &PieceResult{
-				Index:   work.Index,
-				Payload: piece,
-			}:
-				w.downloaded++
+			w.failed++
+			if w.config.Verbose {
+				fmt.Printf("Worker %s: piece %d failed: %v\n",
+					w.peer.AddrPort.String(), info.Index, err)
 			}
+			continue
+		}
+
+		pm.Complete(info.Index, piece)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case results <- &PieceResult{Index: info.Index, Payload: piece}:
+			w.downloaded++
 		}
 	}
 }
 
-// downloadPieceWithRetry attempts to download a piece with retries
-func (w *Worker) downloadPieceWithRetry(ctx context.Context, work *PieceWork) ([]byte, error) {
-	var lastErr error
+// waitForNewPieces sends NotInterested and waits for Have messages
+// that reveal new pieces this peer can serve.
+func (w *Worker) waitForNewPieces(ctx context.Context, pm *PieceManager) error {
+	_ = w.peer.SendNotInterested()
 
-	for attempt := 0; attempt < w.config.MaxRetries; attempt++ {
-		// Check context
+	for {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return ctx.Err()
+		case <-pm.Done():
+			return nil
 		default:
 		}
 
-		// Attempt download
-		piece, err := w.peer.GetPiece(work.Hash, work.Length, uint32(work.Index))
-		if err == nil {
-			return piece, nil // Success!
+		w.peer.Conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+		msg, err := w.peer.ReadMessage()
+		w.peer.Conn.SetReadDeadline(time.Time{})
+
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				continue
+			}
+			return &WorkerError{
+				PeerAddr: w.peer.AddrPort.String(),
+				Phase:    "wait-for-pieces",
+				Err:      err,
+			}
 		}
 
-		lastErr = err
+		if msg.IsKeepAlive() {
+			continue
+		}
 
-		// Backoff before retry
-		if attempt < w.config.MaxRetries-1 {
-			backoff := time.Duration(attempt+1) * 100 * time.Millisecond
-			if w.config.Verbose {
-				fmt.Printf("Worker %s: retry %d/%d for piece %d after %v: %v\n",
-					w.peer.AddrPort.String(), attempt+1, w.config.MaxRetries,
-					work.Index, backoff, err)
-			}
+		switch msg.ID {
+		case internal.MessageHave:
+			if len(msg.Payload) >= 4 {
+				idx := int(binary.BigEndian.Uint32(msg.Payload[0:4]))
+				w.peer.BitField.SetPiece(idx)
+				pm.IncrementAvailability(idx)
 
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(backoff):
-				// Continue to next retry
+				if pm.HasPendingFor(w.peer.BitField) {
+					if err := w.peer.SendInterested(); err != nil {
+						return &WorkerError{
+							PeerAddr: w.peer.AddrPort.String(),
+							Phase:    "re-interested",
+							Err:      err,
+						}
+					}
+					if err := w.peer.WaitForUnchoke(); err != nil {
+						return &WorkerError{
+							PeerAddr: w.peer.AddrPort.String(),
+							Phase:    "re-unchoke",
+							Err:      err,
+						}
+					}
+					return nil // back to pieceLoop
+				}
 			}
+		case internal.MessageChoke:
+			w.peer.Choked = true
+		case internal.MessageUnchoke:
+			w.peer.Choked = false
 		}
 	}
+}
 
-	return nil, fmt.Errorf("failed after %d retries: %w", w.config.MaxRetries, lastErr)
+// cleanup releases resources when the worker exits
+func (w *Worker) cleanup(pm *PieceManager) {
+	if w.config.Verbose {
+		fmt.Printf("Worker %s: attempted=%d, downloaded=%d, failed=%d\n",
+			w.peer.AddrPort.String(), w.attempted, w.downloaded, w.failed)
+	}
+
+	pm.ReleaseAll(w.peer.AddrPort.String())
+	pm.RemoveAvailability(w.peer.BitField)
+
+	if w.peer.Conn != nil {
+		w.peer.Conn.Close()
+	}
 }

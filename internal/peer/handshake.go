@@ -1,9 +1,13 @@
 package peer
 
 import (
+	"bytes"
 	"fmt"
-	"github.com/codecrafters-io/bittorrent-starter-go/internal"
-	"github.com/codecrafters-io/bittorrent-starter-go/internal/bencode"
+	"io"
+	"net"
+
+	"github.com/leorafaelmb/BitTorrent-Client/internal"
+	"github.com/leorafaelmb/BitTorrent-Client/internal/bencode"
 )
 
 // Handshake represents the first message exchanged between peers.
@@ -21,7 +25,7 @@ func constructHandshakeMessage(infoHash [20]byte, ext bool) ([]byte, error) {
 
 	message[0] = internal.ProtocolStringLength
 	copy(message[1:20], internal.ProtocolString)
-	copy(message[20:28], make([]byte, 8))
+	// leave 8 bytes blank for extension protocol
 	copy(message[28:48], infoHash[:])
 	copy(message[48:68], internal.PeerID)
 
@@ -53,6 +57,115 @@ type ExtensionHandshakeResponse struct {
 	MetadataSize     int
 	UtMetadataID     int
 	ExtensionMapping map[string]int
+}
+
+// Handshake performs the BitTorrent handshake with a peer.
+func (p *Peer) Handshake(infoHash [20]byte, ext bool) (*Handshake, error) {
+	c := p.Conn
+	message, err := constructHandshakeMessage(infoHash, ext)
+	if err != nil {
+		return nil, fmt.Errorf("error constructing peer handshake message: %w", err)
+	}
+	_, err = c.Write(message)
+	if err != nil {
+		return nil, fmt.Errorf("error writing peer handshake message to connection: %w", err)
+	}
+	h, err := readHandshake(p.Conn)
+	if err != nil {
+		return nil, err
+	}
+	if infoHash != h.InfoHash {
+		return h, fmt.Errorf("handshake info hash does not match torrent info hash: %w", err)
+
+	}
+
+	copy(p.ID[:], h.PeerID[:])
+
+	return h, nil
+}
+
+func (p *Peer) MagnetHandshake(infoHash [20]byte) (*Handshake, error) {
+	c := p.Conn
+	message := constructMagnetHandshakeMessage(infoHash)
+
+	_, err := c.Write(message)
+	if err != nil {
+		return nil, fmt.Errorf("error writing magnet handshake message: %w", err)
+	}
+
+	h, err := readHandshake(p.Conn)
+	if err != nil {
+		return nil, err
+	}
+
+	if !bytes.Equal(infoHash[:], h.InfoHash[:]) {
+		return nil, fmt.Errorf("handshake info hash mismatch")
+	}
+
+	copy(p.ID[:], h.PeerID[:])
+
+	// Check if peer supports extension protocol
+	if h.Reserved[internal.ExtensionBitPosition]&internal.ExtensionID == 0 {
+		return nil, fmt.Errorf("peer does not support extension protocol")
+	}
+
+	return h, nil
+}
+
+func (p *Peer) ExtensionHandshake() (*ExtensionHandshakeResponse, error) {
+	payload := append([]byte{0}, []byte("d1:md11:ut_metadatai1eee")...)
+
+	// Message ID 20 for extension protocol
+	msg, err := p.SendMessage(20, payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send extension handshake: %w", err)
+	}
+
+	if msg.ID != internal.MessageExtension {
+		return nil, fmt.Errorf("expected extension message (20), got %d", msg.ID)
+	}
+
+	return parseExtensionHandshake(msg.Payload)
+}
+
+// readHandshake reads and parses a handshake message from the connection
+func readHandshake(conn net.Conn) (*Handshake, error) {
+	buf := make([]byte, 68)
+	_, err := io.ReadFull(conn, buf)
+	if err != nil {
+		return nil, fmt.Errorf("error reading handshake response: %w", err)
+	}
+
+	h := &Handshake{}
+	r := bytes.NewReader(buf)
+
+	h.PstrLen, err = r.ReadByte()
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err = io.ReadFull(r, h.Pstr[:]); err != nil {
+		return nil, err
+	}
+
+	if _, err = io.ReadFull(r, h.Reserved[:]); err != nil {
+		return nil, err
+	}
+
+	if _, err = io.ReadFull(r, h.InfoHash[:]); err != nil {
+		return nil, err
+	}
+
+	if _, err = io.ReadFull(r, h.PeerID[:]); err != nil {
+		return nil, err
+	}
+
+	// Validate handshake message
+	if h.PstrLen != internal.ProtocolStringLength || string(h.Pstr[:]) != internal.ProtocolString {
+		fmt.Println(string(h.Pstr[:]))
+		err = fmt.Errorf("invalid handshake: %w", err)
+	}
+	return h, err
 }
 
 func parseExtensionHandshake(payload []byte) (*ExtensionHandshakeResponse, error) {

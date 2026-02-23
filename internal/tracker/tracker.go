@@ -3,117 +3,90 @@ package tracker
 import (
 	"encoding/binary"
 	"fmt"
-	"github.com/codecrafters-io/bittorrent-starter-go/internal"
-	"github.com/codecrafters-io/bittorrent-starter-go/internal/bencode"
-	"io"
-	"net/http"
 	"net/netip"
+	"net/url"
 	"strings"
+	"time"
 )
 
-// TrackerRequest represents a request made to a tracker server
-type TrackerRequest struct {
-	TrackerURL string
-	InfoHash   string // urlencoded 20-byte info hash
-	PeerID     string
-	Port       int
-	Uploaded   int
-	Downloaded int
-	Left       int
-	Compact    int
+type Tracker interface {
+	Announce(req AnnounceRequest) (AnnounceResponse, error)
+	Scrape(infoHashes [][20]byte) (ScrapeFiles, error)
 }
 
-// NewTrackerRequest serves as a constructor for the TrackerRequest struct.
-func NewTrackerRequest(
-	trackerUrl string, infoHash string, left int) *TrackerRequest {
+type AnnounceRequest struct {
+	InfoHash   [20]byte // 20-byte sha1 hash of the bencoded form of the info value from the metainfo file
+	PeerID     [20]byte // 20 byte string which this downloader uses as its id. Each downloader generates its own id at random at the start of a new download.
+	IP         uint32   // optional parameter giving the IP (or dns name) which this peer is at.
+	Port       uint16   // the port number this peer is listening on. try listening on port 6881, try up to 6889.
+	Uploaded   uint64   // total amount uploaded so far
+	Downloaded uint64   // total amount downloaded so far
+	Left       uint64   // number of bytes this peer still has to download. cannot be computed from downloaded and file length
 
-	return &TrackerRequest{
-		TrackerURL: trackerUrl,
-		InfoHash:   infoHash,
-		PeerID:     internal.PeerID,
-		Port:       internal.DefaultPort,
-		Uploaded:   internal.DefaultUploaded,
-		Downloaded: internal.DefaultDownloaded,
-		Left:       left,
-		Compact:    internal.DefaultCompact,
-	}
+	// optional key which maps to started, completed, stopped, or empty. if empty, this is one of
+	// the announcements done at regular intervals. an announcement using started is sent when a
+	// download first begins, and one using completed is sent when the download is complete. no
+	// completed is sent if the file was complete when started. downloaders send an announcement
+	// using stopped when they cease downloading
+	Event uint32
 }
 
-// getFullUrl returns the full url sent to a peer for a handshake
-func (treq TrackerRequest) getFullUrl() string {
-	return fmt.Sprintf(
-		"%s?info_hash=%s&peer_id=%s&port=%d&uploaded=%d&downloaded=%d&left=%d&compact=%d",
-		treq.TrackerURL, treq.InfoHash, treq.PeerID, treq.Port, treq.Uploaded, treq.Downloaded,
-		treq.Left, treq.Compact)
+type AnnounceResponse struct {
+	Interval time.Duration    // number of seconds the downloader should wait between regular rerequests
+	Peers    []netip.AddrPort // list of peers containing IP address and port
 }
 
-func (treq TrackerRequest) SendRequest() (*TrackerResponse, error) {
-	resp, err := http.Get(treq.getFullUrl())
-	if err != nil {
-		return nil, fmt.Errorf("error sending request to tracker server: %w", err)
-	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("error reading tracker response body: %w", err)
-	}
-	trackerResponse, err := newTrackerResponseFromBytes(body)
+type ScrapeFiles map[[20]byte]FileStats
+
+type FileStats struct {
+	Seeders   uint32
+	Completed uint32
+	Leechers  uint32
+}
+
+func NewTracker(trackerURL string) (Tracker, error) {
+	u, err := url.Parse(trackerURL)
 	if err != nil {
 		return nil, err
 	}
-	return trackerResponse, nil
-}
+	proto := strings.ToLower(u.Scheme)
 
-type TrackerResponse struct {
-	Interval int
-	Peers    []netip.AddrPort
-}
-
-func newTrackerResponseFromBytes(response []byte) (*TrackerResponse, error) {
-	decoded, err := bencode.Decode(response)
-	if err != nil {
-		fmt.Println("error decoding tracker response body: ", err)
-		return nil, err
-	}
-	d, ok := decoded.(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("decoded did not return map[string]interface{}")
-	}
-	interval, ok := d["interval"].(int)
-	if !ok {
-		return nil, fmt.Errorf("error reading interval from tracker response")
-	}
-
-	peerBytes, ok := d["peers"].([]byte)
-	if !ok {
-		return nil, fmt.Errorf("error reading peers from tracker response")
-	}
-
-	var peers []netip.AddrPort
-
-	for i := 0; i < len(peerBytes); i += 6 {
-		peerAddr, ok := netip.AddrFromSlice(peerBytes[i : i+4])
-		if !ok {
-			return nil, err
+	switch proto {
+	case "udp":
+		tr, err := newUDPTracker(u.Host)
+		if err != nil {
+			return nil, fmt.Errorf("NewTracker: %w", err)
 		}
-		port := binary.BigEndian.Uint16(peerBytes[i+4 : i+6])
+		return tr, nil
+	case "http", "https":
+		return newHTTPTracker(trackerURL), nil
+	default:
+		return nil, ErrUnsupportedScheme
+	}
+}
+
+// urlEncodeInfoHash URL-encodes a hexadecimal-represented info hash
+func urlEncodeInfoHash(infoHash string) string {
+	urlEncodedHash := ""
+	for i := 0; i < len(infoHash); i += 2 {
+		urlEncodedHash += fmt.Sprintf("%%%s%s", string(infoHash[i]), string(infoHash[i+1]))
+	}
+	return urlEncodedHash
+}
+
+func unmarshalPeerAddresses(numPeers int, data []byte) ([]netip.AddrPort, error) {
+	peers := make([]netip.AddrPort, numPeers)
+
+	for i := 0; i < numPeers; i++ {
+		index := i * 6
+		peerAddr, ok := netip.AddrFromSlice(data[index : index+4])
+		if !ok {
+			return nil, fmt.Errorf("slice length is not 4 or 16")
+		}
+		port := binary.BigEndian.Uint16(data[index+4 : index+6])
 
 		peerAddrPort := netip.AddrPortFrom(peerAddr, port)
-		peers = append(peers, peerAddrPort)
+		peers[i] = peerAddrPort
 	}
-
-	return &TrackerResponse{
-		Interval: interval,
-		Peers:    peers,
-	}, err
-}
-
-func (tres TrackerResponse) PeersString() string {
-	peers := tres.Peers
-	peersString := ""
-	for _, peer := range peers {
-		peersString += fmt.Sprintf("%s\n", peer.String())
-	}
-
-	return strings.TrimSpace(peersString)
+	return peers, nil
 }

@@ -8,6 +8,7 @@ type Config struct {
 	PipelineDepth int
 	Timeout       time.Duration
 	Verbose       bool
+	PieceSelector PieceSelector
 }
 
 func DefaultConfig() Config {
@@ -40,5 +41,11 @@ func WithMaxRetries(n int) Option {
 func WithVerbose(verbose bool) Option {
 	return func(c *Config) {
 		c.Verbose = verbose
+	}
+}
+
+func WithPieceSelector(s PieceSelector) Option {
+	return func(c *Config) {
+		c.PieceSelector = s
 	}
 }
