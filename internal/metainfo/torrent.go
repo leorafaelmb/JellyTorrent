@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/leorafaelmb/BitTorrent-Client/internal/bencode"
+	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
 )
 
 // TorrentFile represents a parsed .torrent file
@@ -47,7 +48,7 @@ func newTorrentFile(dict interface{}) (*TorrentFile, error) {
 			announceList[i] = link
 		}
 	}
-	fmt.Println(announceList)
+	logger.Log.Debug("parsed announce list", "trackers", announceList)
 	infoMap, ok := d["info"].(map[string]interface{})
 	if !ok {
 		return nil, fmt.Errorf("newTorrent: info value is not a map")
@@ -58,6 +59,7 @@ func newTorrentFile(dict interface{}) (*TorrentFile, error) {
 	}
 
 	info.InfoHash = info.getInfoHash()
+	logger.Log.Debug("torrent parsed", "announce", announce, "name", info.Name)
 	return &TorrentFile{
 		Announce:     announce,
 		AnnounceList: announceList,
@@ -67,6 +69,7 @@ func newTorrentFile(dict interface{}) (*TorrentFile, error) {
 
 // DeserializeTorrent reads and parses a .torrent file from disk.
 func DeserializeTorrent(filePath string) (*TorrentFile, error) {
+	logger.Log.Debug("deserializing torrent", "path", filePath)
 	contents, err := parseTorrent(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("error parsing torrent file: %w", err)

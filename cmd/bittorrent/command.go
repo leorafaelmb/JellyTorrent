@@ -2,12 +2,13 @@ package main
 
 import (
 	"crypto/rand"
-	"fmt"
+	"path/filepath"
+
 	"github.com/leorafaelmb/BitTorrent-Client/internal/downloader"
+	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/metainfo"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/peer"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/tracker"
-	"path/filepath"
 )
 
 func runCommand(command string, args []string) error {
@@ -24,17 +25,23 @@ func runCommand(command string, args []string) error {
 }
 
 func handleDownload(args []string) error {
-	downloadFilePath := args[3]
-	torrentFilePath := args[4]
-	fmt.Println(downloadFilePath)
+	downloadFilePath := args[2]
+	torrentFilePath := args[3]
+	logger.Log.Debug("download destination", "path", downloadFilePath)
 
 	t, err := metainfo.DeserializeTorrent(torrentFilePath)
 	if err != nil {
 		return err
 	}
 
-	fmt.Println("\nStarting download...")
+	logger.Log.Info("starting download",
+		"torrent", torrentFilePath,
+		"name", t.Info.Name,
+		"pieces", len(t.Info.PieceHashes()),
+		"size", t.Info.Length,
+	)
 
+	logger.Log.Debug("announcing to tracker", "url", t.Announce)
 	tr, err := tracker.NewTracker(t.Announce)
 	if err != nil {
 		return err
@@ -59,10 +66,7 @@ func handleDownload(args []string) error {
 		return err
 	}
 
-	if err != nil {
-		return err
-	}
-	fmt.Printf("Found %d peers\n", len(trackerResp.Peers))
+	logger.Log.Info("peers discovered", "count", len(trackerResp.Peers))
 
 	// Create Peer objects from addresses
 	peerList := make([]peer.Peer, len(trackerResp.Peers))
@@ -76,17 +80,19 @@ func handleDownload(args []string) error {
 	}
 
 	if t.Info.IsSingleFile() {
-		fmt.Printf("File saved to: %s\n", downloadFilePath)
+		logger.Log.Info("download complete", "path", downloadFilePath)
 	} else {
-		fmt.Printf("Files saved to directory: %s\n", filepath.Join(filepath.Dir(downloadFilePath), t.Info.Name))
+		logger.Log.Info("download complete", "dir", filepath.Join(filepath.Dir(downloadFilePath), t.Info.Name))
 	}
 
 	return nil
 }
 
 func handleMagnetDownload(args []string) error {
-	downloadFilePath := args[3]
-	magnetURL := args[4]
+	downloadFilePath := args[2]
+	magnetURL := args[3]
+
+	logger.Log.Info("starting magnet download")
 
 	p, magnet, err := ConnectToMagnetPeer(magnetURL)
 	defer p.Conn.Close()
@@ -101,6 +107,8 @@ func handleMagnetDownload(args []string) error {
 		Info:     metadata,
 	}
 	t.Info.InfoHash = magnet.InfoHash
+
+	logger.Log.Info("metadata downloaded", "name", t.Info.Name)
 
 	tr, err := tracker.NewTracker(magnetURL)
 	if err != nil {
@@ -123,6 +131,8 @@ func handleMagnetDownload(args []string) error {
 		return err
 	}
 
+	logger.Log.Info("peers discovered", "count", len(annResp.Peers))
+
 	peerList := make([]peer.Peer, len(annResp.Peers))
 	for i, addr := range annResp.Peers {
 		peerList[i] = peer.Peer{AddrPort: addr}
@@ -133,9 +143,9 @@ func handleMagnetDownload(args []string) error {
 	}
 
 	if t.Info.IsSingleFile() {
-		fmt.Printf("File saved to: %s\n", downloadFilePath)
+		logger.Log.Info("download complete", "path", downloadFilePath)
 	} else {
-		fmt.Printf("Files saved to directory: %s\n", filepath.Join(filepath.Dir(downloadFilePath), t.Info.Name))
+		logger.Log.Info("download complete", "dir", filepath.Join(filepath.Dir(downloadFilePath), t.Info.Name))
 	}
 
 	return nil
@@ -165,6 +175,8 @@ func ConnectToMagnetPeer(magnetURL string) (*peer.Peer, *metainfo.MagnetLink, er
 		return nil, nil, err
 	}
 
+	logger.Log.Debug("connecting to magnet peer", "addr", ann.Peers[0])
+
 	p := &peer.Peer{AddrPort: ann.Peers[0]}
 	if err = p.Connect(); err != nil {
 		return nil, nil, err
@@ -179,6 +191,8 @@ func ConnectToMagnetPeer(magnetURL string) (*peer.Peer, *metainfo.MagnetLink, er
 		p.Conn.Close()
 		return nil, nil, err
 	}
+
+	logger.Log.Debug("magnet peer ready", "addr", ann.Peers[0])
 
 	return p, magnet, nil
 }

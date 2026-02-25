@@ -1,8 +1,10 @@
 package downloader
 
 import (
+	"fmt"
 	"sync"
 
+	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/peer"
 )
 
@@ -67,6 +69,7 @@ func (pm *PieceManager) Assign(peerAddr string, bitfield peer.BitField) (*PieceI
 
 	pm.states[idx] = PieceInProgress
 	pm.owners[idx] = peerAddr
+	logger.Log.Debug("piece assigned", "piece", idx, "peer", peerAddr, "candidates", len(candidates))
 	return &pm.pieces[idx], true
 }
 
@@ -84,7 +87,10 @@ func (pm *PieceManager) Complete(index int, data []byte) {
 	pm.owners[index] = ""
 	pm.completed++
 
+	logger.Log.Debug("piece completed", "piece", index, "progress", fmt.Sprintf("%d/%d", pm.completed, pm.total))
+
 	if pm.completed == pm.total {
+		logger.Log.Info("all pieces downloaded", "total", pm.total)
 		close(pm.done)
 	}
 }
@@ -97,6 +103,7 @@ func (pm *PieceManager) Release(index int) {
 	if pm.states[index] == PieceInProgress {
 		pm.states[index] = PiecePending
 		pm.owners[index] = ""
+		logger.Log.Debug("piece released", "piece", index)
 	}
 }
 
@@ -105,11 +112,16 @@ func (pm *PieceManager) ReleaseAll(peerAddr string) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
+	released := 0
 	for i, owner := range pm.owners {
 		if owner == peerAddr && pm.states[i] == PieceInProgress {
 			pm.states[i] = PiecePending
 			pm.owners[i] = ""
+			released++
 		}
+	}
+	if released > 0 {
+		logger.Log.Debug("released pieces for peer", "peer", peerAddr, "count", released)
 	}
 }
 

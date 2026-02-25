@@ -10,6 +10,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
 )
 
 type UDPTracker struct {
@@ -34,6 +36,8 @@ func (t *UDPTracker) connectionExpired() bool {
 // NewTracker creates a UDPTracker with all values filled.
 // Returns a UDPTracker that has already connected to the tracker and any error that may have occurred.
 func newUDPTracker(url string) (*UDPTracker, error) {
+	logger.Log.Debug("resolving UDP tracker", "host", url)
+
 	t := &UDPTracker{}
 	addr, err := net.ResolveUDPAddr("udp", url)
 	if err != nil {
@@ -55,12 +59,16 @@ func newUDPTracker(url string) (*UDPTracker, error) {
 		return nil, err
 	}
 
+	logger.Log.Debug("UDP tracker connected", "host", url)
+
 	return t, nil
 }
 
 // connect() connects the BitTorrent client to the UDP tracker.
 // returns the connectionID and any error that may have occurred.
 func (t *UDPTracker) connect() (uint64, error) {
+	logger.Log.Debug("UDP connect handshake")
+
 	reqBytes, transactionID := marshalConnectRequest()
 
 	respBytes, err := t.sendWithDeadline(reqBytes, true)
@@ -83,6 +91,8 @@ func (t *UDPTracker) connect() (uint64, error) {
 }
 
 func (t *UDPTracker) Announce(req AnnounceRequest) (AnnounceResponse, error) {
+	logger.Log.Debug("UDP announce request")
+
 	reqBytes, transactionID := t.marshalAnnounceRequest(req, 0, 0)
 	respBytes, err := t.sendWithDeadline(reqBytes, false)
 	if err != nil {
@@ -130,6 +140,7 @@ func (t *UDPTracker) sendWithDeadline(data []byte, connect bool) ([]byte, error)
 		if err != nil {
 			if errors.Is(err, os.ErrDeadlineExceeded) {
 				t.conn.n++
+				logger.Log.Debug("UDP timeout, retrying", "attempt", t.conn.n)
 				continue
 			}
 			return nil, err

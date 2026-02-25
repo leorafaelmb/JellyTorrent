@@ -7,6 +7,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
 )
 
 type Tracker interface {
@@ -50,6 +52,8 @@ func NewTracker(trackerURL string) (Tracker, error) {
 		return nil, err
 	}
 	proto := strings.ToLower(u.Scheme)
+
+	logger.Log.Info("creating tracker", "scheme", proto, "url", trackerURL)
 
 	switch proto {
 	case "udp":

@@ -11,6 +11,7 @@ import (
 
 	"github.com/leorafaelmb/BitTorrent-Client/internal"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/bencode"
+	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/metainfo"
 )
 
@@ -39,11 +40,13 @@ func (m *PeerMessage) IsKeepAlive() bool {
 
 // Connect establishes a TCP connection to the peer
 func (p *Peer) Connect() error {
+	logger.Log.Debug("connecting to peer", "addr", p.AddrPort)
 	conn, err := net.DialTimeout("tcp", p.AddrPort.String(), internal.ConnectionTimeout*time.Second)
 	if err != nil {
 		return fmt.Errorf("error connecting to peer: %w", err)
 	}
 	p.Conn = conn
+	logger.Log.Debug("connected to peer", "addr", p.AddrPort)
 	return nil
 }
 
@@ -105,6 +108,8 @@ func (p *Peer) ReadBitfield() (*PeerMessage, error) {
 
 	p.BitField = msg.Payload
 
+	logger.Log.Debug("bitfield received", "bytes", len(msg.Payload))
+
 	return msg, nil
 }
 
@@ -121,17 +126,20 @@ func (p *Peer) SendOnly(messageID byte, payload []byte) error {
 
 // SendInterested sends an interested message to the peer.
 func (p *Peer) SendInterested() error {
+	logger.Log.Debug("sending interested", "peer", p.AddrPort)
 	return p.SendOnly(internal.MessageInterested, nil)
 }
 
 // SendNotInterested sends a not-interested message to the peer.
 func (p *Peer) SendNotInterested() error {
+	logger.Log.Debug("sending not-interested", "peer", p.AddrPort)
 	return p.SendOnly(internal.MessageNotInterested, nil)
 }
 
 // WaitForUnchoke reads messages until an Unchoke is received.
 // Processes Have, KeepAlive, and other messages encountered along the way.
 func (p *Peer) WaitForUnchoke() error {
+	logger.Log.Debug("waiting for unchoke", "peer", p.AddrPort)
 	for {
 		msg, err := p.ReadMessage()
 		if err != nil {
@@ -145,13 +153,16 @@ func (p *Peer) WaitForUnchoke() error {
 		switch msg.ID {
 		case internal.MessageUnchoke:
 			p.Choked = false
+			logger.Log.Debug("peer unchoked us", "peer", p.AddrPort)
 			return nil
 		case internal.MessageChoke:
 			p.Choked = true
+			logger.Log.Debug("peer choked us while waiting", "peer", p.AddrPort)
 		case internal.MessageHave:
 			if len(msg.Payload) >= 4 {
 				idx := int(binary.BigEndian.Uint32(msg.Payload[0:4]))
 				p.BitField.SetPiece(idx)
+				logger.Log.Debug("received have during unchoke wait", "peer", p.AddrPort, "piece", idx)
 			}
 		case internal.MessageBitfield:
 			p.BitField = msg.Payload
@@ -246,6 +257,7 @@ func (p *Peer) getBlocks(requests []BlockRequest) ([][]byte, error) {
 
 		case internal.MessageChoke:
 			p.Choked = true
+			logger.Log.Warn("peer choked during block download", "peer", p.AddrPort)
 			return nil, ErrChoked
 
 		case internal.MessageUnchoke:
@@ -255,6 +267,7 @@ func (p *Peer) getBlocks(requests []BlockRequest) ([][]byte, error) {
 			if len(msg.Payload) >= 4 {
 				idx := int(binary.BigEndian.Uint32(msg.Payload[0:4]))
 				p.BitField.SetPiece(idx)
+				logger.Log.Debug("received have during download", "peer", p.AddrPort, "piece", idx)
 			}
 
 		default:
@@ -289,6 +302,8 @@ func (p *Peer) GetPiece(pieceHash []byte, pieceLength, pieceIndex uint32) ([]byt
 		remaining -= blockLen
 	}
 
+	logger.Log.Debug("downloading piece", "index", pieceIndex, "length", pieceLength, "blocks", len(requests))
+
 	blocks, err := p.getBlocks(requests)
 	if err != nil {
 		return nil, fmt.Errorf("error downloading blocks: %w", err)
@@ -299,8 +314,11 @@ func (p *Peer) GetPiece(pieceHash []byte, pieceLength, pieceIndex uint32) ([]byt
 	}
 
 	if !bytes.Equal(metainfo.HashPiece(piece), pieceHash) {
+		logger.Log.Warn("piece hash mismatch", "index", pieceIndex)
 		return nil, fmt.Errorf("invalid piece hash for piece %d", pieceIndex)
 	}
+
+	logger.Log.Debug("piece verified", "index", pieceIndex)
 
 	return piece, nil
 }
@@ -337,12 +355,12 @@ func (p *Peer) DownloadMetadata(magnet *metainfo.MagnetLink) (*metainfo.Info, er
 
 	numPieces := (extResp.MetadataSize + internal.MetadataPieceSize - 1) / internal.MetadataPieceSize
 
-	fmt.Printf("Downloading metadata: %d bytes in %d pieces\n", extResp.MetadataSize, numPieces)
+	logger.Log.Info("downloading metadata", "bytes", extResp.MetadataSize, "pieces", numPieces)
 
 	// Download metadata pieces
 	metadata := make([]byte, 0, extResp.MetadataSize)
 	for i := 0; i < numPieces; i++ {
-		fmt.Printf("Requesting metadata piece %d/%d\n", i+1, numPieces)
+		logger.Log.Debug("requesting metadata piece", "piece", i+1, "total", numPieces)
 
 		piece, err := p.RequestMetadataPiece(byte(extResp.UtMetadataID), i)
 		if err != nil {
@@ -362,6 +380,8 @@ func (p *Peer) DownloadMetadata(magnet *metainfo.MagnetLink) (*metainfo.Info, er
 	if !bytes.Equal(calculatedHash, magnet.InfoHash[:]) {
 		return nil, fmt.Errorf("metadata hash mismatch")
 	}
+
+	logger.Log.Debug("metadata hash verified")
 
 	// Decode metadata (it's a bencoded info dict)
 	decoded, err := bencode.Decode(metadata)

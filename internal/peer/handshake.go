@@ -8,6 +8,7 @@ import (
 
 	"github.com/leorafaelmb/BitTorrent-Client/internal"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/bencode"
+	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
 )
 
 // Handshake represents the first message exchanged between peers.
@@ -61,6 +62,8 @@ type ExtensionHandshakeResponse struct {
 
 // Handshake performs the BitTorrent handshake with a peer.
 func (p *Peer) Handshake(infoHash [20]byte, ext bool) (*Handshake, error) {
+	logger.Log.Debug("performing handshake", "peer", p.AddrPort)
+
 	c := p.Conn
 	message, err := constructHandshakeMessage(infoHash, ext)
 	if err != nil {
@@ -81,10 +84,14 @@ func (p *Peer) Handshake(infoHash [20]byte, ext bool) (*Handshake, error) {
 
 	copy(p.ID[:], h.PeerID[:])
 
+	logger.Log.Debug("handshake successful", "peer", p.AddrPort, "peerID", fmt.Sprintf("%x", h.PeerID))
+
 	return h, nil
 }
 
 func (p *Peer) MagnetHandshake(infoHash [20]byte) (*Handshake, error) {
+	logger.Log.Debug("performing magnet handshake", "peer", p.AddrPort)
+
 	c := p.Conn
 	message := constructMagnetHandshakeMessage(infoHash)
 
@@ -113,6 +120,8 @@ func (p *Peer) MagnetHandshake(infoHash [20]byte) (*Handshake, error) {
 }
 
 func (p *Peer) ExtensionHandshake() (*ExtensionHandshakeResponse, error) {
+	logger.Log.Debug("extension handshake", "peer", p.AddrPort)
+
 	payload := append([]byte{0}, []byte("d1:md11:ut_metadatai1eee")...)
 
 	// Message ID 20 for extension protocol
@@ -162,7 +171,7 @@ func readHandshake(conn net.Conn) (*Handshake, error) {
 
 	// Validate handshake message
 	if h.PstrLen != internal.ProtocolStringLength || string(h.Pstr[:]) != internal.ProtocolString {
-		fmt.Println(string(h.Pstr[:]))
+		logger.Log.Debug("invalid protocol string", "pstr", string(h.Pstr[:]))
 		err = fmt.Errorf("invalid handshake: %w", err)
 	}
 	return h, err

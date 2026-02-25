@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/leorafaelmb/BitTorrent-Client/internal/bencode"
+	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
 )
 
 type MagnetLink struct {
@@ -16,6 +17,7 @@ type MagnetLink struct {
 }
 
 func DeserializeMagnet(uri string) (*MagnetLink, error) {
+	logger.Log.Debug("deserializing magnet link")
 	magnetUri, err := url.Parse(uri)
 	if err != nil {
 		return nil, err
@@ -30,6 +32,8 @@ func DeserializeMagnet(uri string) (*MagnetLink, error) {
 		return nil, err
 	}
 	copy(infoHash[:], decodedHash)
+
+	logger.Log.Debug("magnet parsed", "tracker", trackerURL, "infoHash", hexInfoHash)
 
 	return &MagnetLink{
 		TrackerURL:  trackerURL,

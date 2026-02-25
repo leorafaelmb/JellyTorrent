@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/leorafaelmb/BitTorrent-Client/internal/bencode"
+	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
 )
 
 type HTTPTracker struct {
@@ -21,6 +22,8 @@ func newHTTPTracker(url string) *HTTPTracker {
 }
 
 func (t *HTTPTracker) Announce(req AnnounceRequest) (AnnounceResponse, error) {
+	logger.Log.Debug("HTTP announce request", "url", t.url)
+
 	resp, err := http.Get(t.marshalHTTPAnnounceRequest(req))
 	if err != nil {
 		return AnnounceResponse{}, fmt.Errorf("error sending HTTP request to tracker: %w", err)
@@ -37,6 +40,9 @@ func (t *HTTPTracker) Announce(req AnnounceRequest) (AnnounceResponse, error) {
 	if err != nil {
 		return AnnounceResponse{}, err
 	}
+
+	logger.Log.Debug("HTTP announce response", "peers", len(trackerResponse.Peers))
+
 	return trackerResponse, nil
 }
 

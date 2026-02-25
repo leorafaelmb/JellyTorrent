@@ -7,7 +7,6 @@ type Config struct {
 	MaxRetries    int
 	PipelineDepth int
 	Timeout       time.Duration
-	Verbose       bool
 	PieceSelector PieceSelector
 }
 
@@ -15,8 +14,7 @@ func DefaultConfig() Config {
 	return Config{
 		MaxWorkers: 50,
 		MaxRetries: 3,
-		Timeout:    5 * time.Minute,
-		Verbose:    false,
+		Timeout:    50 * time.Minute,
 	}
 }
 
@@ -35,12 +33,6 @@ func WithMaxRetries(n int) Option {
 		if n > 0 {
 			c.MaxRetries = n
 		}
-	}
-}
-
-func WithVerbose(verbose bool) Option {
-	return func(c *Config) {
-		c.Verbose = verbose
 	}
 }
 

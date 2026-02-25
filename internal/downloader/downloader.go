@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/metainfo"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/peer"
 )
@@ -80,15 +81,16 @@ func (d *Downloader) Download() ([]byte, error) {
 	var wg sync.WaitGroup
 	numWorkers := min(d.config.MaxWorkers, len(d.peers))
 
+	logger.Log.Info("starting download", "pieces", numPieces, "workers", numWorkers)
+	logger.Log.Debug("piece manager initialized", "pieces", numPieces, "pieceLength", pieceLength)
+
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
 		go func(p peer.Peer) {
 			defer wg.Done()
 			worker := NewWorker(&p, d.torrent, d.config)
 			if err := worker.Run(d.ctx, d.pieceManager, d.results); err != nil {
-				if d.config.Verbose {
-					fmt.Printf("Worker error: %v\n", err)
-				}
+				logger.Log.Debug("worker error", "peer", p.AddrPort, "error", err)
 			}
 		}(d.peers[i])
 	}
@@ -106,6 +108,7 @@ func (d *Downloader) collectResults() ([]byte, error) {
 	for {
 		select {
 		case <-d.ctx.Done():
+			logger.Log.Error("download timed out")
 			return nil, fmt.Errorf("download timeout")
 
 		case _, ok := <-d.results:
@@ -115,6 +118,7 @@ func (d *Downloader) collectResults() ([]byte, error) {
 				if err := d.validatePieces(data); err != nil {
 					return nil, err
 				}
+				logger.Log.Info("download complete")
 				fileBytes := make([]byte, 0, d.torrent.Info.Length)
 				for _, piece := range data {
 					fileBytes = append(fileBytes, piece...)
@@ -151,6 +155,7 @@ func (d *Downloader) SaveFile(downloadPath string, data []byte) error {
 	files := d.torrent.Info.GetFiles()
 
 	if d.torrent.Info.IsSingleFile() {
+		logger.Log.Info("saving file", "path", downloadPath)
 		return os.WriteFile(downloadPath, data, 0644)
 	}
 	baseDir := filepath.Join(filepath.Dir(downloadPath), d.torrent.Info.Name)
@@ -174,7 +179,7 @@ func (d *Downloader) SaveFile(downloadPath string, data []byte) error {
 			return fmt.Errorf("error writing file %s: %w", filePath, err)
 		}
 
-		fmt.Printf("Wrote file: %s (%d bytes)\n", filePath, fileInfo.Length)
+		logger.Log.Info("wrote file", "path", filePath, "bytes", fileInfo.Length)
 		offset += fileInfo.Length
 	}
 

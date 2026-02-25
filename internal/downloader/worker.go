@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"net"
 	"time"
 
 	"github.com/leorafaelmb/BitTorrent-Client/internal"
+	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/metainfo"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/peer"
 )
@@ -35,6 +35,8 @@ func NewWorker(p *peer.Peer, t *metainfo.TorrentFile, cfg Config) *Worker {
 
 // Run executes the worker's download loop
 func (w *Worker) Run(ctx context.Context, pm *PieceManager, results chan<- *PieceResult) error {
+	logger.Log.Debug("starting worker", "peer", w.peer.AddrPort)
+
 	if err := w.connect(ctx); err != nil {
 		return err
 	}
@@ -104,6 +106,8 @@ func (w *Worker) setup() error {
 		}
 	}
 
+	logger.Log.Debug("worker setup complete", "peer", w.peer.AddrPort)
+
 	return nil
 }
 
@@ -130,16 +134,14 @@ func (w *Worker) pieceLoop(ctx context.Context, pm *PieceManager, results chan<-
 		}
 
 		w.attempted++
+		logger.Log.Debug("piece assigned", "peer", w.peer.AddrPort, "piece", info.Index)
 
 		piece, err := w.peer.GetPiece(info.Hash, info.Length, uint32(info.Index))
 		if err != nil {
 			pm.Release(info.Index)
 
 			if errors.Is(err, peer.ErrChoked) {
-				if w.config.Verbose {
-					fmt.Printf("Worker %s: choked during piece %d, waiting for unchoke\n",
-						w.peer.AddrPort.String(), info.Index)
-				}
+				logger.Log.Debug("choked during download, waiting", "peer", w.peer.AddrPort, "piece", info.Index)
 				if err := w.peer.WaitForUnchoke(); err != nil {
 					return &WorkerError{
 						PeerAddr: w.peer.AddrPort.String(),
@@ -151,14 +153,12 @@ func (w *Worker) pieceLoop(ctx context.Context, pm *PieceManager, results chan<-
 			}
 
 			w.failed++
-			if w.config.Verbose {
-				fmt.Printf("Worker %s: piece %d failed: %v\n",
-					w.peer.AddrPort.String(), info.Index, err)
-			}
+			logger.Log.Debug("piece download failed", "peer", w.peer.AddrPort, "piece", info.Index, "error", err)
 			continue
 		}
 
 		pm.Complete(info.Index, piece)
+		logger.Log.Debug("piece completed", "peer", w.peer.AddrPort, "piece", info.Index)
 
 		select {
 		case <-ctx.Done():
@@ -172,6 +172,7 @@ func (w *Worker) pieceLoop(ctx context.Context, pm *PieceManager, results chan<-
 // waitForNewPieces sends NotInterested and waits for Have messages
 // that reveal new pieces this peer can serve.
 func (w *Worker) waitForNewPieces(ctx context.Context, pm *PieceManager) error {
+	logger.Log.Debug("waiting for new pieces", "peer", w.peer.AddrPort)
 	_ = w.peer.SendNotInterested()
 
 	for {
@@ -210,6 +211,7 @@ func (w *Worker) waitForNewPieces(ctx context.Context, pm *PieceManager) error {
 				pm.IncrementAvailability(idx)
 
 				if pm.HasPendingFor(w.peer.BitField) {
+					logger.Log.Debug("new piece available, re-interested", "peer", w.peer.AddrPort)
 					if err := w.peer.SendInterested(); err != nil {
 						return &WorkerError{
 							PeerAddr: w.peer.AddrPort.String(),
@@ -237,10 +239,12 @@ func (w *Worker) waitForNewPieces(ctx context.Context, pm *PieceManager) error {
 
 // cleanup releases resources when the worker exits
 func (w *Worker) cleanup(pm *PieceManager) {
-	if w.config.Verbose {
-		fmt.Printf("Worker %s: attempted=%d, downloaded=%d, failed=%d\n",
-			w.peer.AddrPort.String(), w.attempted, w.downloaded, w.failed)
-	}
+	logger.Log.Info("worker finished",
+		"peer", w.peer.AddrPort,
+		"attempted", w.attempted,
+		"downloaded", w.downloaded,
+		"failed", w.failed,
+	)
 
 	pm.ReleaseAll(w.peer.AddrPort.String())
 	pm.RemoveAvailability(w.peer.BitField)
