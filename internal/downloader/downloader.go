@@ -72,7 +72,7 @@ func (d *Downloader) Download() ([]byte, error) {
 
 	selector := d.config.PieceSelector
 	if selector == nil {
-		selector = &SequentialSelector{}
+		selector = &RarestFirstSelector{}
 	}
 
 	d.pieceManager = NewPieceManager(pieces, selector)

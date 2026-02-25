@@ -12,9 +12,10 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
-		MaxWorkers: 50,
-		MaxRetries: 3,
-		Timeout:    50 * time.Minute,
+		MaxWorkers:    50,
+		MaxRetries:    3,
+		Timeout:       50 * time.Minute,
+		PieceSelector: &RarestFirstSelector{},
 	}
 }
 
