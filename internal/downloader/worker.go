@@ -18,6 +18,7 @@ type Worker struct {
 	peer    *peer.Peer
 	torrent *metainfo.TorrentFile
 	config  Config
+	pm      *PieceManager
 
 	attempted  int
 	downloaded int
@@ -36,6 +37,7 @@ func NewWorker(p *peer.Peer, t *metainfo.TorrentFile, cfg Config) *Worker {
 // Run executes the worker's download loop
 func (w *Worker) Run(ctx context.Context, pm *PieceManager, results chan<- *PieceResult) error {
 	logger.Log.Debug("starting worker", "peer", w.peer.AddrPort)
+	w.pm = pm
 
 	if err := w.connect(ctx); err != nil {
 		return err
@@ -48,7 +50,10 @@ func (w *Worker) Run(ctx context.Context, pm *PieceManager, results chan<- *Piec
 
 	pm.AddAvailability(w.peer.BitField)
 
-	return w.pieceLoop(ctx, pm, results)
+	haveCh := pm.SubscribeHave()
+	defer pm.UnsubscribeHave(haveCh)
+
+	return w.pieceLoop(ctx, pm, results, haveCh)
 }
 
 // connect establishes connection to the peer
@@ -90,6 +95,13 @@ func (w *Worker) setup() error {
 		}
 	}
 
+	// Set up upload support: unchoke the peer so they can request from us
+	w.peer.BlockServer = NewBlockServer(w.pm)
+	w.peer.AmChoking = false
+	if err = w.peer.SendOnly(internal.MessageUnchoke, nil); err != nil {
+		logger.Log.Debug("failed to send unchoke to peer", "peer", w.peer.AddrPort, "error", err)
+	}
+
 	if err = w.peer.SendInterested(); err != nil {
 		return &WorkerError{
 			PeerAddr: w.peer.AddrPort.String(),
@@ -112,8 +124,10 @@ func (w *Worker) setup() error {
 }
 
 // pieceLoop requests and downloads pieces from the peer
-func (w *Worker) pieceLoop(ctx context.Context, pm *PieceManager, results chan<- *PieceResult) error {
+func (w *Worker) pieceLoop(ctx context.Context, pm *PieceManager, results chan<- *PieceResult, haveCh <-chan int) error {
 	for {
+		w.sendPendingHaves(haveCh)
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -127,7 +141,7 @@ func (w *Worker) pieceLoop(ctx context.Context, pm *PieceManager, results chan<-
 			if pm.IsFinished() {
 				return nil
 			}
-			if err := w.waitForNewPieces(ctx, pm); err != nil {
+			if err := w.waitForNewPieces(ctx, pm, haveCh); err != nil {
 				return err
 			}
 			continue
@@ -171,7 +185,7 @@ func (w *Worker) pieceLoop(ctx context.Context, pm *PieceManager, results chan<-
 
 // waitForNewPieces sends NotInterested and waits for Have messages
 // that reveal new pieces this peer can serve.
-func (w *Worker) waitForNewPieces(ctx context.Context, pm *PieceManager) error {
+func (w *Worker) waitForNewPieces(ctx context.Context, pm *PieceManager, haveCh <-chan int) error {
 	logger.Log.Debug("waiting for new pieces", "peer", w.peer.AddrPort)
 	_ = w.peer.SendNotInterested()
 
@@ -183,6 +197,8 @@ func (w *Worker) waitForNewPieces(ctx context.Context, pm *PieceManager) error {
 			return nil
 		default:
 		}
+
+		w.sendPendingHaves(haveCh)
 
 		w.peer.Conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		msg, err := w.peer.ReadMessage()
@@ -233,6 +249,27 @@ func (w *Worker) waitForNewPieces(ctx context.Context, pm *PieceManager) error {
 			w.peer.Choked = true
 		case internal.MessageUnchoke:
 			w.peer.Choked = false
+		case internal.MessageRequest:
+			if err := w.peer.HandleRequest(msg.Payload); err != nil {
+				logger.Log.Debug("error serving request during wait", "peer", w.peer.AddrPort, "error", err)
+			}
+		}
+	}
+}
+
+// sendPendingHaves drains the Have notification channel and sends Have messages to the peer.
+func (w *Worker) sendPendingHaves(haveCh <-chan int) {
+	for {
+		select {
+		case idx := <-haveCh:
+			payload := make([]byte, 4)
+			binary.BigEndian.PutUint32(payload, uint32(idx))
+			if err := w.peer.SendOnly(internal.MessageHave, payload); err != nil {
+				logger.Log.Debug("failed to send have", "peer", w.peer.AddrPort, "piece", idx, "error", err)
+				return
+			}
+		default:
+			return
 		}
 	}
 }

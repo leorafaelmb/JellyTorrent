@@ -34,6 +34,9 @@ type PieceManager struct {
 	completed int
 	total     int
 	done      chan struct{}
+
+	haveSubsMu sync.Mutex
+	haveSubs   []chan int
 }
 
 func NewPieceManager(pieces []PieceInfo, selector PieceSelector) *PieceManager {
@@ -76,9 +79,9 @@ func (pm *PieceManager) Assign(peerAddr string, bitfield peer.BitField) (*PieceI
 // Complete marks a piece as completed and stores its data.
 func (pm *PieceManager) Complete(index int, data []byte) {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
 
 	if pm.states[index] == PieceCompleted {
+		pm.mu.Unlock()
 		return
 	}
 
@@ -93,6 +96,17 @@ func (pm *PieceManager) Complete(index int, data []byte) {
 		logger.Log.Info("all pieces downloaded", "total", pm.total)
 		close(pm.done)
 	}
+	pm.mu.Unlock()
+
+	// Notify Have subscribers (outside main lock)
+	pm.haveSubsMu.Lock()
+	for _, ch := range pm.haveSubs {
+		select {
+		case ch <- index:
+		default:
+		}
+	}
+	pm.haveSubsMu.Unlock()
 }
 
 // Release returns an InProgress piece back to Pending.
@@ -188,5 +202,42 @@ func (pm *PieceManager) IncrementAvailability(index int) {
 
 	if index >= 0 && index < len(pm.availability) {
 		pm.availability[index]++
+	}
+}
+
+// GetPieceData returns the data for a completed piece, or nil, false if not available.
+func (pm *PieceManager) GetPieceData(index int) ([]byte, bool) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	if index < 0 || index >= len(pm.states) {
+		return nil, false
+	}
+	if pm.states[index] != PieceCompleted {
+		return nil, false
+	}
+	return pm.data[index], true
+}
+
+// SubscribeHave returns a channel that receives piece indices as they complete.
+func (pm *PieceManager) SubscribeHave() chan int {
+	pm.haveSubsMu.Lock()
+	defer pm.haveSubsMu.Unlock()
+
+	ch := make(chan int, 64)
+	pm.haveSubs = append(pm.haveSubs, ch)
+	return ch
+}
+
+// UnsubscribeHave removes a Have subscription channel.
+func (pm *PieceManager) UnsubscribeHave(ch chan int) {
+	pm.haveSubsMu.Lock()
+	defer pm.haveSubsMu.Unlock()
+
+	for i, sub := range pm.haveSubs {
+		if sub == ch {
+			pm.haveSubs = append(pm.haveSubs[:i], pm.haveSubs[i+1:]...)
+			return
+		}
 	}
 }

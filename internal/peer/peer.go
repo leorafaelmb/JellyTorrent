@@ -15,6 +15,11 @@ import (
 	"github.com/leorafaelmb/BitTorrent-Client/internal/metainfo"
 )
 
+// BlockServer provides read access to completed piece data for serving upload requests.
+type BlockServer interface {
+	GetBlock(pieceIndex int, begin, length uint32) ([]byte, bool)
+}
+
 // Peer represents a network connection to another BitTorrent client.
 type Peer struct {
 	AddrPort netip.AddrPort
@@ -24,6 +29,10 @@ type Peer struct {
 	Choked bool
 
 	BitField BitField
+
+	// Upload state
+	BlockServer BlockServer // nil means no upload support
+	AmChoking   bool        // whether we are choking this peer (starts true per BT spec)
 }
 
 // PeerMessage represents a message sent between peers after the handshake
@@ -136,6 +145,38 @@ func (p *Peer) SendNotInterested() error {
 	return p.SendOnly(internal.MessageNotInterested, nil)
 }
 
+// HandleRequest processes an incoming Request message from a peer.
+// Silently ignores if BlockServer is nil, we're choking the peer, or the piece is unavailable.
+func (p *Peer) HandleRequest(payload []byte) error {
+	if p.BlockServer == nil || p.AmChoking {
+		return nil
+	}
+	if len(payload) < 12 {
+		return nil
+	}
+
+	index := binary.BigEndian.Uint32(payload[0:4])
+	begin := binary.BigEndian.Uint32(payload[4:8])
+	length := binary.BigEndian.Uint32(payload[8:12])
+
+	if length > 131072 {
+		return nil
+	}
+
+	block, ok := p.BlockServer.GetBlock(int(index), begin, length)
+	if !ok {
+		return nil
+	}
+
+	piecePayload := make([]byte, 8+len(block))
+	binary.BigEndian.PutUint32(piecePayload[0:4], index)
+	binary.BigEndian.PutUint32(piecePayload[4:8], begin)
+	copy(piecePayload[8:], block)
+
+	logger.Log.Debug("serving block", "peer", p.AddrPort, "piece", index, "offset", begin, "length", length)
+	return p.SendOnly(internal.MessagePiece, piecePayload)
+}
+
 // WaitForUnchoke reads messages until an Unchoke is received.
 // Processes Have, KeepAlive, and other messages encountered along the way.
 func (p *Peer) WaitForUnchoke() error {
@@ -166,6 +207,10 @@ func (p *Peer) WaitForUnchoke() error {
 			}
 		case internal.MessageBitfield:
 			p.BitField = msg.Payload
+		case internal.MessageRequest:
+			if err := p.HandleRequest(msg.Payload); err != nil {
+				logger.Log.Debug("error serving request during unchoke wait", "peer", p.AddrPort, "error", err)
+			}
 		}
 	}
 }
@@ -268,6 +313,11 @@ func (p *Peer) getBlocks(requests []BlockRequest) ([][]byte, error) {
 				idx := int(binary.BigEndian.Uint32(msg.Payload[0:4]))
 				p.BitField.SetPiece(idx)
 				logger.Log.Debug("received have during download", "peer", p.AddrPort, "piece", idx)
+			}
+
+		case internal.MessageRequest:
+			if err := p.HandleRequest(msg.Payload); err != nil {
+				logger.Log.Debug("error serving request during download", "peer", p.AddrPort, "error", err)
 			}
 
 		default:
