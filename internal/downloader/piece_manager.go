@@ -205,6 +205,13 @@ func (pm *PieceManager) IncrementAvailability(index int) {
 	}
 }
 
+// Progress returns the number of completed and total pieces.
+func (pm *PieceManager) Progress() (completed int, total int) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	return pm.completed, pm.total
+}
+
 // GetPieceData returns the data for a completed piece, or nil, false if not available.
 func (pm *PieceManager) GetPieceData(index int) ([]byte, bool) {
 	pm.mu.Lock()

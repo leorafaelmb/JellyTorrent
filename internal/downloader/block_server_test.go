@@ -77,6 +77,27 @@ func TestBlockServer_GetBlock(t *testing.T) {
 	}
 }
 
+func TestProgress(t *testing.T) {
+	pm := NewPieceManager([]PieceInfo{
+		{Index: 0, Hash: nil, Length: 100},
+		{Index: 1, Hash: nil, Length: 100},
+		{Index: 2, Hash: nil, Length: 50},
+	}, &SequentialSelector{})
+
+	completed, total := pm.Progress()
+	if completed != 0 || total != 3 {
+		t.Fatalf("expected (0, 3), got (%d, %d)", completed, total)
+	}
+
+	pm.Complete(0, []byte("data0"))
+	pm.Complete(2, []byte("data2"))
+
+	completed, total = pm.Progress()
+	if completed != 2 || total != 3 {
+		t.Fatalf("expected (2, 3), got (%d, %d)", completed, total)
+	}
+}
+
 func TestHaveSubscription(t *testing.T) {
 	pm := NewPieceManager([]PieceInfo{
 		{Index: 0, Hash: nil, Length: 100},

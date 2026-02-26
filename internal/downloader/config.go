@@ -1,6 +1,10 @@
 package downloader
 
-import "time"
+import (
+	"time"
+
+	"github.com/leorafaelmb/BitTorrent-Client/internal/tracker"
+)
 
 type Config struct {
 	MaxWorkers    int
@@ -8,6 +12,9 @@ type Config struct {
 	PipelineDepth int
 	Timeout       time.Duration
 	PieceSelector PieceSelector
+	Tracker           tracker.Tracker
+	AnnounceReq       tracker.AnnounceRequest
+	AnnounceInterval  time.Duration
 }
 
 func DefaultConfig() Config {
@@ -40,5 +47,18 @@ func WithMaxRetries(n int) Option {
 func WithPieceSelector(s PieceSelector) Option {
 	return func(c *Config) {
 		c.PieceSelector = s
+	}
+}
+
+func WithTracker(tr tracker.Tracker, req tracker.AnnounceRequest) Option {
+	return func(c *Config) {
+		c.Tracker = tr
+		c.AnnounceReq = req
+	}
+}
+
+func WithAnnounceInterval(d time.Duration) Option {
+	return func(c *Config) {
+		c.AnnounceInterval = d
 	}
 }

@@ -57,8 +57,8 @@ func handleDownload(args []string) error {
 		Port:       6881,
 		Uploaded:   0,
 		Downloaded: 0,
-		Left:       uint64(len(t.Info.Pieces)),
-		Event:      0,
+		Left:       uint64(t.Info.Length),
+		Event:      tracker.EventStarted,
 	}
 
 	trackerResp, err := tr.Announce(announceReq)
@@ -75,9 +75,17 @@ func handleDownload(args []string) error {
 		peerList[i] = peer.Peer{AddrPort: addrCopy}
 	}
 
-	if err = downloader.DownloadFile(t, peerList, 50, downloadFilePath); err != nil {
+	if err = downloader.DownloadFile(t, peerList, 50, downloadFilePath,
+		downloader.WithTracker(tr, announceReq),
+		downloader.WithAnnounceInterval(trackerResp.Interval),
+	); err != nil {
 		return err
 	}
+
+	// Best-effort stopped announce
+	announceReq.Event = tracker.EventStopped
+	announceReq.Left = 0
+	tr.Announce(announceReq)
 
 	if t.Info.IsSingleFile() {
 		logger.Log.Info("download complete", "path", downloadFilePath)
@@ -122,8 +130,8 @@ func handleMagnetDownload(args []string) error {
 		Port:       6881,
 		Uploaded:   0,
 		Downloaded: 0,
-		Left:       uint64(len(t.Info.Pieces)),
-		Event:      0,
+		Left:       uint64(t.Info.Length),
+		Event:      tracker.EventStarted,
 	}
 
 	annResp, err := tr.Announce(annReq)
@@ -138,9 +146,17 @@ func handleMagnetDownload(args []string) error {
 		peerList[i] = peer.Peer{AddrPort: addr}
 	}
 
-	if err = downloader.DownloadFile(&t, peerList, 50, downloadFilePath); err != nil {
+	if err = downloader.DownloadFile(&t, peerList, 50, downloadFilePath,
+		downloader.WithTracker(tr, annReq),
+		downloader.WithAnnounceInterval(annResp.Interval),
+	); err != nil {
 		return err
 	}
+
+	// Best-effort stopped announce
+	annReq.Event = tracker.EventStopped
+	annReq.Left = 0
+	tr.Announce(annReq)
 
 	if t.Info.IsSingleFile() {
 		logger.Log.Info("download complete", "path", downloadFilePath)

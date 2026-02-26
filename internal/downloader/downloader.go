@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/metainfo"
@@ -83,6 +84,16 @@ func (d *Downloader) Download() ([]byte, error) {
 
 	logger.Log.Info("starting download", "pieces", numPieces, "workers", numWorkers)
 	logger.Log.Debug("piece manager initialized", "pieces", numPieces, "pieceLength", pieceLength)
+
+	// Start tracker updater if a tracker was configured
+	if d.config.Tracker != nil {
+		interval := d.config.AnnounceInterval
+		if interval <= 0 {
+			interval = 30 * time.Minute
+		}
+		tu := NewTrackerUpdater(d.config.Tracker, d.config.AnnounceReq, d.pieceManager, d.torrent.Info.Length, int(pieceLength))
+		go tu.Run(d.ctx, interval)
+	}
 
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
@@ -186,8 +197,9 @@ func (d *Downloader) SaveFile(downloadPath string, data []byte) error {
 	return nil
 }
 
-func DownloadFile(t *metainfo.TorrentFile, peers []peer.Peer, maxWorkers int, downloadPath string) error {
-	d := New(t, peers, WithMaxWorkers(maxWorkers))
+func DownloadFile(t *metainfo.TorrentFile, peers []peer.Peer, maxWorkers int, downloadPath string, opts ...Option) error {
+	allOpts := append([]Option{WithMaxWorkers(maxWorkers)}, opts...)
+	d := New(t, peers, allOpts...)
 	fileBytes, err := d.Download()
 	if err != nil {
 		return err
