@@ -106,6 +106,20 @@ func parseTorrent(path string) ([]byte, error) {
 	return fileBytes, nil
 }
 
+// TrackerURLs returns a deduplicated list of tracker URLs with Announce first,
+// followed by entries from AnnounceList.
+func (t *TorrentFile) TrackerURLs() []string {
+	seen := map[string]bool{t.Announce: true}
+	urls := []string{t.Announce}
+	for _, u := range t.AnnounceList {
+		if u != "" && !seen[u] {
+			seen[u] = true
+			urls = append(urls, u)
+		}
+	}
+	return urls
+}
+
 // String returns a string representation of the torrent file
 func (t TorrentFile) String() string {
 	filesInfo := ""

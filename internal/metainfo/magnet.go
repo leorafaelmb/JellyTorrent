@@ -11,9 +11,17 @@ import (
 )
 
 type MagnetLink struct {
-	TrackerURL  string
+	TrackerURLs []string
 	InfoHash    [20]byte
 	HexInfoHash string
+}
+
+// TrackerURL returns the first tracker URL for convenience.
+func (m *MagnetLink) TrackerURL() string {
+	if len(m.TrackerURLs) > 0 {
+		return m.TrackerURLs[0]
+	}
+	return ""
 }
 
 func DeserializeMagnet(uri string) (*MagnetLink, error) {
@@ -23,7 +31,7 @@ func DeserializeMagnet(uri string) (*MagnetLink, error) {
 		return nil, err
 	}
 
-	trackerURL := magnetUri.Query()["tr"][0]
+	trackerURLs := magnetUri.Query()["tr"]
 	hexInfoHash := strings.ReplaceAll(magnetUri.Query()["xt"][0], "urn:btih:", "")
 
 	var infoHash [20]byte
@@ -33,10 +41,10 @@ func DeserializeMagnet(uri string) (*MagnetLink, error) {
 	}
 	copy(infoHash[:], decodedHash)
 
-	logger.Log.Debug("magnet parsed", "tracker", trackerURL, "infoHash", hexInfoHash)
+	logger.Log.Debug("magnet parsed", "trackers", len(trackerURLs), "infoHash", hexInfoHash)
 
 	return &MagnetLink{
-		TrackerURL:  trackerURL,
+		TrackerURLs: trackerURLs,
 		InfoHash:    infoHash,
 		HexInfoHash: hexInfoHash,
 	}, nil

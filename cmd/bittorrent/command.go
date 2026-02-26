@@ -41,8 +41,7 @@ func handleDownload(args []string) error {
 		"size", t.Info.Length,
 	)
 
-	logger.Log.Debug("announcing to tracker", "url", t.Announce)
-	tr, err := tracker.NewTracker(t.Announce)
+	tr, err := tracker.NewMultiTracker(t.TrackerURLs())
 	if err != nil {
 		return err
 	}
@@ -111,14 +110,14 @@ func handleMagnetDownload(args []string) error {
 	}
 
 	t := metainfo.TorrentFile{
-		Announce: magnet.TrackerURL,
+		Announce: magnet.TrackerURL(),
 		Info:     metadata,
 	}
 	t.Info.InfoHash = magnet.InfoHash
 
 	logger.Log.Info("metadata downloaded", "name", t.Info.Name)
 
-	tr, err := tracker.NewTracker(magnetURL)
+	tr, err := tracker.NewMultiTracker(magnet.TrackerURLs)
 	if err != nil {
 		return err
 	}
@@ -172,7 +171,7 @@ func ConnectToMagnetPeer(magnetURL string) (*peer.Peer, *metainfo.MagnetLink, er
 	if err != nil {
 		return nil, nil, err
 	}
-	tr, err := tracker.NewTracker(magnetURL)
+	tr, err := tracker.NewMultiTracker(magnet.TrackerURLs)
 	if err != nil {
 		return nil, nil, err
 	}
