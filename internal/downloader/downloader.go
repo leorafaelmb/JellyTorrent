@@ -76,11 +76,11 @@ func (d *Downloader) Download() ([]byte, error) {
 		selector = &RarestFirstSelector{}
 	}
 
-	d.pieceManager = NewPieceManager(pieces, selector)
-	d.results = make(chan *PieceResult, numPieces)
-
 	var wg sync.WaitGroup
 	numWorkers := min(d.config.MaxWorkers, len(d.peers))
+
+	d.pieceManager = NewPieceManager(pieces, selector, numWorkers)
+	d.results = make(chan *PieceResult, numPieces)
 
 	logger.Log.Info("starting download", "pieces", numPieces, "workers", numWorkers)
 	logger.Log.Debug("piece manager initialized", "pieces", numPieces, "pieceLength", pieceLength)

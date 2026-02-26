@@ -31,48 +31,75 @@ type PieceManager struct {
 	availability []int    // per-piece count of peers that have it
 	selector     PieceSelector
 
-	completed int
-	total     int
-	done      chan struct{}
+	completed          int
+	total              int
+	done               chan struct{}
+	endgameThreshold   int
+	endgameActivated   bool
 
 	haveSubsMu sync.Mutex
 	haveSubs   []chan int
 }
 
-func NewPieceManager(pieces []PieceInfo, selector PieceSelector) *PieceManager {
+func NewPieceManager(pieces []PieceInfo, selector PieceSelector, endgameThreshold int) *PieceManager {
 	n := len(pieces)
 	return &PieceManager{
-		pieces:       pieces,
-		states:       make([]PieceState, n),
-		data:         make([][]byte, n),
-		owners:       make([]string, n),
-		availability: make([]int, n),
-		selector:     selector,
-		total:        n,
-		done:         make(chan struct{}),
+		pieces:           pieces,
+		states:           make([]PieceState, n),
+		data:             make([][]byte, n),
+		owners:           make([]string, n),
+		availability:     make([]int, n),
+		selector:         selector,
+		total:            n,
+		done:             make(chan struct{}),
+		endgameThreshold: endgameThreshold,
 	}
 }
 
 // Assign finds a Pending piece that the peer has and transitions it to InProgress.
+// In endgame mode (few pieces remaining), also returns InProgress pieces owned by
+// other peers, allowing multiple workers to download the same piece simultaneously.
 func (pm *PieceManager) Assign(peerAddr string, bitfield peer.BitField) (*PieceInfo, bool) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
+	remaining := pm.total - pm.completed
+	endgame := pm.endgameThreshold > 0 && remaining <= pm.endgameThreshold
+
+	if endgame && !pm.endgameActivated {
+		pm.endgameActivated = true
+		logger.Log.Info("endgame mode activated", "remaining", remaining)
+	}
+
 	var candidates []int
+	var endgameCandidates []int
 	for i, state := range pm.states {
-		if state == PiecePending && bitfield.HasPiece(i) {
+		if !bitfield.HasPiece(i) {
+			continue
+		}
+		if state == PiecePending {
 			candidates = append(candidates, i)
+		} else if endgame && state == PieceInProgress && pm.owners[i] != peerAddr {
+			endgameCandidates = append(endgameCandidates, i)
 		}
 	}
 
+	// Prefer pending pieces; fall back to endgame duplicates
 	idx, ok := pm.selector.Select(candidates, pm.availability)
 	if !ok {
-		return nil, false
+		idx, ok = pm.selector.Select(endgameCandidates, pm.availability)
+		if !ok {
+			return nil, false
+		}
 	}
 
-	pm.states[idx] = PieceInProgress
-	pm.owners[idx] = peerAddr
-	logger.Log.Debug("piece assigned", "piece", idx, "peer", peerAddr, "candidates", len(candidates))
+	// Only update state and owner for newly assigned (Pending) pieces
+	if pm.states[idx] == PiecePending {
+		pm.states[idx] = PieceInProgress
+		pm.owners[idx] = peerAddr
+	}
+
+	logger.Log.Debug("piece assigned", "piece", idx, "peer", peerAddr, "candidates", len(candidates), "endgame", endgame)
 	return &pm.pieces[idx], true
 }
 
