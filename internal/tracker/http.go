@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/leorafaelmb/BitTorrent-Client/internal/bencode"
+	"github.com/leorafaelmb/bencode"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
 )
 

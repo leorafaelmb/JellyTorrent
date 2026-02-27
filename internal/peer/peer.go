@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/leorafaelmb/BitTorrent-Client/internal"
-	"github.com/leorafaelmb/BitTorrent-Client/internal/bencode"
+	"github.com/leorafaelmb/bencode"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/metainfo"
 )

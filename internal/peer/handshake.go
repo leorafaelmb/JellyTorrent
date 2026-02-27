@@ -7,7 +7,7 @@ import (
 	"net"
 
 	"github.com/leorafaelmb/BitTorrent-Client/internal"
-	"github.com/leorafaelmb/BitTorrent-Client/internal/bencode"
+	"github.com/leorafaelmb/bencode"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
 )
 

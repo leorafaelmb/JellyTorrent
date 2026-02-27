@@ -6,8 +6,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/leorafaelmb/BitTorrent-Client/internal/bencode"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
+	"github.com/leorafaelmb/bencode"
 )
 
 type MagnetLink struct {
