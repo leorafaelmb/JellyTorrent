@@ -150,8 +150,20 @@ func (w *Worker) pieceLoop(ctx context.Context, pm *PieceManager, results chan<-
 		w.attempted++
 		logger.Log.Debug("piece assigned", "peer", w.peer.AddrPort, "piece", info.Index)
 
-		piece, err := w.peer.GetPiece(info.Hash, info.Length, uint32(info.Index))
+		// In endgame mode, get a cancel channel so we can abort if another
+		// worker completes this piece first, sending Cancel for in-flight blocks.
+		var cancelCh <-chan struct{}
+		if pm.IsEndgame() {
+			cancelCh = pm.CancelCh(info.Index)
+		}
+
+		piece, err := w.peer.GetPiece(info.Hash, info.Length, uint32(info.Index), cancelCh)
 		if err != nil {
+			if errors.Is(err, peer.ErrPieceCancelled) {
+				logger.Log.Debug("piece cancelled (completed by another peer)", "peer", w.peer.AddrPort, "piece", info.Index)
+				continue
+			}
+
 			pm.Release(info.Index)
 
 			if errors.Is(err, peer.ErrChoked) {

@@ -37,6 +37,11 @@ type PieceManager struct {
 	endgameThreshold   int
 	endgameActivated   bool
 
+	// Per-piece cancel channels for endgame mode. When a piece completes,
+	// its cancel channel is closed, signaling other workers downloading
+	// the same piece to send Cancel messages and abort.
+	cancelChs map[int]chan struct{}
+
 	haveSubsMu sync.Mutex
 	haveSubs   []chan int
 }
@@ -53,6 +58,7 @@ func NewPieceManager(pieces []PieceInfo, selector PieceSelector, endgameThreshol
 		total:            n,
 		done:             make(chan struct{}),
 		endgameThreshold: endgameThreshold,
+		cancelChs:        make(map[int]chan struct{}),
 	}
 }
 
@@ -103,6 +109,21 @@ func (pm *PieceManager) Assign(peerAddr string, bitfield peer.BitField) (*PieceI
 	return &pm.pieces[idx], true
 }
 
+// CancelCh returns a channel that will be closed when the given piece is
+// completed by another worker. Used in endgame mode so workers can send
+// Cancel messages for in-flight block requests.
+func (pm *PieceManager) CancelCh(index int) <-chan struct{} {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	ch, ok := pm.cancelChs[index]
+	if !ok {
+		ch = make(chan struct{})
+		pm.cancelChs[index] = ch
+	}
+	return ch
+}
+
 // Complete marks a piece as completed and stores its data.
 func (pm *PieceManager) Complete(index int, data []byte) {
 	pm.mu.Lock()
@@ -116,6 +137,12 @@ func (pm *PieceManager) Complete(index int, data []byte) {
 	pm.data[index] = data
 	pm.owners[index] = ""
 	pm.completed++
+
+	// Close the cancel channel to notify endgame workers downloading this piece
+	if ch, ok := pm.cancelChs[index]; ok {
+		close(ch)
+		delete(pm.cancelChs, index)
+	}
 
 	logger.Log.Debug("piece completed", "piece", index, "progress", fmt.Sprintf("%d/%d", pm.completed, pm.total))
 
@@ -164,6 +191,13 @@ func (pm *PieceManager) ReleaseAll(peerAddr string) {
 	if released > 0 {
 		logger.Log.Debug("released pieces for peer", "peer", peerAddr, "count", released)
 	}
+}
+
+// IsEndgame returns true if endgame mode has been activated.
+func (pm *PieceManager) IsEndgame() bool {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	return pm.endgameActivated
 }
 
 // IsFinished returns true if all pieces are completed.

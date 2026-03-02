@@ -252,6 +252,16 @@ type BlockRequest struct {
 	Length uint32
 }
 
+// SendCancel sends a Cancel message (ID 8) for a specific block request.
+// Same payload format as Request: piece index, byte offset, block length.
+func (p *Peer) SendCancel(index, begin, length uint32) error {
+	payload := make([]byte, 12)
+	binary.BigEndian.PutUint32(payload[0:4], index)
+	binary.BigEndian.PutUint32(payload[4:8], begin)
+	binary.BigEndian.PutUint32(payload[8:12], length)
+	return p.SendOnly(internal.MessageCancel, payload)
+}
+
 // sendRequestOnly sends a request without waiting for a response.
 // Used in pipelining to send multiple requests back-to-back.
 func (p *Peer) sendRequestOnly(index, begin, length uint32) error {
@@ -266,7 +276,9 @@ func (p *Peer) sendRequestOnly(index, begin, length uint32) error {
 
 // getBlocks downloads multiple blocks using TCP pipelining.
 // Handles interleaved Choke, Have, KeepAlive, and Unchoke messages.
-func (p *Peer) getBlocks(requests []BlockRequest) ([][]byte, error) {
+// If cancelCh is non-nil and a signal is received, sends Cancel messages
+// for all in-flight block requests and returns ErrPieceCancelled.
+func (p *Peer) getBlocks(requests []BlockRequest, cancelCh <-chan struct{}) ([][]byte, error) {
 	numBlocks := len(requests)
 	blocks := make([][]byte, numBlocks)
 
@@ -274,6 +286,16 @@ func (p *Peer) getBlocks(requests []BlockRequest) ([][]byte, error) {
 	received := 0
 
 	for received < numBlocks {
+		// Check for cancellation before sending more requests
+		if cancelCh != nil {
+			select {
+			case <-cancelCh:
+				p.cancelInFlight(requests, received, requested)
+				return nil, ErrPieceCancelled
+			default:
+			}
+		}
+
 		for requested < numBlocks && requested-received < internal.MaxPipelineRequests {
 			req := requests[requested]
 
@@ -327,9 +349,26 @@ func (p *Peer) getBlocks(requests []BlockRequest) ([][]byte, error) {
 	return blocks, nil
 }
 
+// cancelInFlight sends Cancel messages for all blocks that have been requested
+// but not yet received.
+func (p *Peer) cancelInFlight(requests []BlockRequest, received, requested int) {
+	for i := received; i < requested; i++ {
+		req := requests[i]
+		if err := p.SendCancel(req.Index, req.Begin, req.Length); err != nil {
+			logger.Log.Debug("failed to send cancel", "peer", p.AddrPort,
+				"piece", req.Index, "offset", req.Begin, "error", err)
+			return
+		}
+	}
+	logger.Log.Debug("sent cancel messages", "peer", p.AddrPort,
+		"piece", requests[0].Index, "cancelled", requested-received)
+}
+
 // GetPiece downloads and verifies a complete piece.
 // Breaks the piece into 16KB blocks and uses pipelining for download efficiency.
-func (p *Peer) GetPiece(pieceHash []byte, pieceLength, pieceIndex uint32) ([]byte, error) {
+// If cancelCh is non-nil, the download can be aborted when the channel is closed,
+// sending Cancel messages for in-flight requests (used in endgame mode).
+func (p *Peer) GetPiece(pieceHash []byte, pieceLength, pieceIndex uint32, cancelCh <-chan struct{}) ([]byte, error) {
 	piece := make([]byte, 0, pieceLength)
 
 	var requests []BlockRequest
@@ -354,7 +393,7 @@ func (p *Peer) GetPiece(pieceHash []byte, pieceLength, pieceIndex uint32) ([]byt
 
 	logger.Log.Debug("downloading piece", "index", pieceIndex, "length", pieceLength, "blocks", len(requests))
 
-	blocks, err := p.getBlocks(requests)
+	blocks, err := p.getBlocks(requests, cancelCh)
 	if err != nil {
 		return nil, fmt.Errorf("error downloading blocks: %w", err)
 	}
