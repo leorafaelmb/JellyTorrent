@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -27,10 +28,16 @@ func runCommand(command string, args []string) error {
 
 }
 
+var dhtStatePath = filepath.Join(os.TempDir(), "jellytorrent", "dht_state.dat")
+
 // startDHT creates and bootstraps a DHT node. Returns the DHT instance
 // (caller must Close it) or nil if bootstrap fails.
 func startDHT() *Kademlia.DHT {
-	dht, err := Kademlia.New()
+	os.MkdirAll(filepath.Dir(dhtStatePath), 0755)
+
+	dht, err := Kademlia.New(
+		Kademlia.WithRoutingTable(dhtStatePath),
+	)
 	if err != nil {
 		logger.Log.Debug("failed to create DHT node", "error", err)
 		return nil
@@ -148,7 +155,10 @@ func handleDownload(args []string) error {
 	// DHT: bootstrap, discover additional peers, announce
 	dht := startDHT()
 	if dht != nil {
-		defer dht.Close()
+		defer func() {
+			dht.Save(dhtStatePath)
+			dht.Close()
+		}()
 		peerList = dhtPeers(dht, t.Info.InfoHash, peerList)
 		go dhtAnnounce(dht, t.Info.InfoHash, 6881)
 	}
@@ -227,7 +237,10 @@ func handleMagnetDownload(args []string) error {
 	// DHT: bootstrap, discover additional peers, announce
 	dht := startDHT()
 	if dht != nil {
-		defer dht.Close()
+		defer func() {
+			dht.Save(dhtStatePath)
+			dht.Close()
+		}()
 		peerList = dhtPeers(dht, magnet.InfoHash, peerList)
 		go dhtAnnounce(dht, magnet.InfoHash, 6881)
 	}
