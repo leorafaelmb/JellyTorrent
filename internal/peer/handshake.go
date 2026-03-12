@@ -6,9 +6,9 @@ import (
 	"io"
 	"net"
 
-	"github.com/leorafaelmb/BitTorrent-Client/internal"
-	"github.com/leorafaelmb/bencode"
-	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
+	"github.com/leorafaelmb/JellyTorrent/internal"
+	"github.com/leorafaelmb/JellyTorrent/internal/bencode"
+	"github.com/leorafaelmb/JellyTorrent/internal/logger"
 )
 
 // Handshake represents the first message exchanged between peers.

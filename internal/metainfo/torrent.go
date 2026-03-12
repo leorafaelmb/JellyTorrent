@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
-	"github.com/leorafaelmb/bencode"
+	"github.com/leorafaelmb/JellyTorrent/internal/logger"
+	"github.com/leorafaelmb/JellyTorrent/internal/bencode"
 )
 
 // TorrentFile represents a parsed .torrent file

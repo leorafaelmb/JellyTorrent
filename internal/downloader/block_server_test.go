@@ -3,7 +3,7 @@ package downloader
 import (
 	"testing"
 
-	"github.com/leorafaelmb/BitTorrent-Client/internal/peer"
+	"github.com/leorafaelmb/JellyTorrent/internal/peer"
 )
 
 func TestGetPieceData_Completed(t *testing.T) {

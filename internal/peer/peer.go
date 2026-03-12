@@ -9,10 +9,10 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/leorafaelmb/BitTorrent-Client/internal"
-	"github.com/leorafaelmb/bencode"
-	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
-	"github.com/leorafaelmb/BitTorrent-Client/internal/metainfo"
+	"github.com/leorafaelmb/JellyTorrent/internal"
+	"github.com/leorafaelmb/JellyTorrent/internal/bencode"
+	"github.com/leorafaelmb/JellyTorrent/internal/logger"
+	"github.com/leorafaelmb/JellyTorrent/internal/metainfo"
 )
 
 // BlockServer provides read access to completed piece data for serving upload requests.

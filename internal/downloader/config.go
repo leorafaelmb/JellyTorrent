@@ -3,7 +3,7 @@ package downloader
 import (
 	"time"
 
-	"github.com/leorafaelmb/BitTorrent-Client/internal/tracker"
+	"github.com/leorafaelmb/JellyTorrent/internal/tracker"
 )
 
 type Config struct {

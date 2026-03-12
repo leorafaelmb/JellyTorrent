@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
+	"github.com/leorafaelmb/JellyTorrent/internal/logger"
 )
 
 type Tracker interface {

@@ -8,10 +8,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
-	"github.com/leorafaelmb/BitTorrent-Client/internal/metainfo"
-	"github.com/leorafaelmb/BitTorrent-Client/internal/peer"
-	"github.com/leorafaelmb/BitTorrent-Client/internal/storage"
+	"github.com/leorafaelmb/JellyTorrent/internal/logger"
+	"github.com/leorafaelmb/JellyTorrent/internal/metainfo"
+	"github.com/leorafaelmb/JellyTorrent/internal/peer"
+	"github.com/leorafaelmb/JellyTorrent/internal/storage"
+	"github.com/leorafaelmb/JellyTorrent/internal/tracker"
 )
 
 type Downloader struct {
@@ -220,4 +221,52 @@ func DownloadFile(t *metainfo.TorrentFile, peers []peer.Peer, maxWorkers int, do
 		return err
 	}
 	return nil
+}
+
+// ConnectToMagnetPeer resolves a magnet link, discovers peers via its trackers,
+// and returns a connected peer ready for metadata download.
+func ConnectToMagnetPeer(magnetURL string) (*peer.Peer, *metainfo.MagnetLink, error) {
+	magnet, err := metainfo.DeserializeMagnet(magnetURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	tr, err := tracker.NewMultiTracker(magnet.TrackerURLs)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	trReq := tracker.AnnounceRequest{
+		InfoHash:   magnet.InfoHash,
+		PeerID:     [20]byte{},
+		Uploaded:   0,
+		Downloaded: 0,
+		Left:       0,
+		Event:      0,
+	}
+
+	ann, err := tr.Announce(trReq)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	logger.Log.Debug("connecting to magnet peer", "addr", ann.Peers[0])
+
+	p := &peer.Peer{AddrPort: ann.Peers[0]}
+	if err = p.Connect(); err != nil {
+		return nil, nil, err
+	}
+
+	if _, err = p.MagnetHandshake(magnet.InfoHash); err != nil {
+		p.Conn.Close()
+		return nil, nil, err
+	}
+
+	if _, err = p.ReadBitfield(); err != nil {
+		p.Conn.Close()
+		return nil, nil, err
+	}
+
+	logger.Log.Debug("magnet peer ready", "addr", ann.Peers[0])
+
+	return p, magnet, nil
 }

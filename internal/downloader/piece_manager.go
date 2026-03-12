@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
-	"github.com/leorafaelmb/BitTorrent-Client/internal/peer"
-	"github.com/leorafaelmb/BitTorrent-Client/internal/storage"
+	"github.com/leorafaelmb/JellyTorrent/internal/logger"
+	"github.com/leorafaelmb/JellyTorrent/internal/peer"
+	"github.com/leorafaelmb/JellyTorrent/internal/storage"
 )
 
 type PieceState int

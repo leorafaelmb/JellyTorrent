@@ -4,7 +4,7 @@ import (
 	"flag"
 	"os"
 
-	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
+	"github.com/leorafaelmb/JellyTorrent/internal/logger"
 )
 
 func main() {

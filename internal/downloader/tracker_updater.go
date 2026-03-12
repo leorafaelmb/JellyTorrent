@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
-	"github.com/leorafaelmb/BitTorrent-Client/internal/tracker"
+	"github.com/leorafaelmb/JellyTorrent/internal/logger"
+	"github.com/leorafaelmb/JellyTorrent/internal/tracker"
 )
 
 // TrackerUpdater periodically re-announces to the tracker during download

@@ -1,6 +1,6 @@
 package downloader
 
-import "github.com/leorafaelmb/BitTorrent-Client/internal/peer"
+import "github.com/leorafaelmb/JellyTorrent/internal/peer"
 
 // PieceManagerBlockServer adapts PieceManager to the peer.BlockServer interface.
 type PieceManagerBlockServer struct {

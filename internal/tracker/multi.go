@@ -3,7 +3,7 @@ package tracker
 import (
 	"fmt"
 
-	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
+	"github.com/leorafaelmb/JellyTorrent/internal/logger"
 )
 
 // MultiTracker implements the Tracker interface by trying multiple trackers

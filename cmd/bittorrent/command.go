@@ -8,12 +8,12 @@ import (
 	"path/filepath"
 	"time"
 
-	Kademlia "github.com/leorafaelmb/Kademlia"
-	"github.com/leorafaelmb/BitTorrent-Client/internal/downloader"
-	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
-	"github.com/leorafaelmb/BitTorrent-Client/internal/metainfo"
-	"github.com/leorafaelmb/BitTorrent-Client/internal/peer"
-	"github.com/leorafaelmb/BitTorrent-Client/internal/tracker"
+	"github.com/leorafaelmb/JellyTorrent/internal/dht"
+	"github.com/leorafaelmb/JellyTorrent/internal/downloader"
+	"github.com/leorafaelmb/JellyTorrent/internal/logger"
+	"github.com/leorafaelmb/JellyTorrent/internal/metainfo"
+	"github.com/leorafaelmb/JellyTorrent/internal/peer"
+	"github.com/leorafaelmb/JellyTorrent/internal/tracker"
 )
 
 func runCommand(command string, args []string) error {
@@ -42,11 +42,11 @@ func defaultStorageDir() string {
 
 // startDHT creates and bootstraps a DHT node. Returns the DHT instance
 // (caller must Close it) or nil if bootstrap fails.
-func startDHT() *Kademlia.DHT {
+func startDHT() *dht.DHT {
 	os.MkdirAll(filepath.Dir(dhtStatePath), 0755)
 
-	dht, err := Kademlia.New(
-		Kademlia.WithRoutingTable(dhtStatePath),
+	d, err := dht.New(
+		dht.WithRoutingTable(dhtStatePath),
 	)
 	if err != nil {
 		logger.Log.Debug("failed to create DHT node", "error", err)
@@ -56,22 +56,22 @@ func startDHT() *Kademlia.DHT {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := dht.Bootstrap(ctx); err != nil {
+	if err := d.Bootstrap(ctx); err != nil {
 		logger.Log.Debug("DHT bootstrap failed", "error", err)
-		dht.Close()
+		d.Close()
 		return nil
 	}
 
 	logger.Log.Info("DHT bootstrapped")
-	return dht
+	return d
 }
 
 // dhtPeers queries the DHT for peers and returns them merged with existing peers.
-func dhtPeers(dht *Kademlia.DHT, infoHash [20]byte, existing []peer.Peer) []peer.Peer {
+func dhtPeers(d *dht.DHT, infoHash [20]byte, existing []peer.Peer) []peer.Peer {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	addrs, err := dht.GetPeers(ctx, infoHash)
+	addrs, err := d.GetPeers(ctx, infoHash)
 	if err != nil {
 		logger.Log.Debug("DHT get_peers failed", "error", err)
 		return existing
@@ -101,11 +101,11 @@ func dhtPeers(dht *Kademlia.DHT, infoHash [20]byte, existing []peer.Peer) []peer
 }
 
 // dhtAnnounce announces to the DHT that we are downloading/seeding a torrent.
-func dhtAnnounce(dht *Kademlia.DHT, infoHash [20]byte, port int) {
+func dhtAnnounce(d *dht.DHT, infoHash [20]byte, port int) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := dht.Announce(ctx, infoHash, port); err != nil {
+	if err := d.Announce(ctx, infoHash, port); err != nil {
 		logger.Log.Debug("DHT announce failed", "error", err)
 	} else {
 		logger.Log.Debug("DHT announce complete")
@@ -163,14 +163,14 @@ func handleDownload(args []string) error {
 	}
 
 	// DHT: bootstrap, discover additional peers, announce
-	dht := startDHT()
-	if dht != nil {
+	d := startDHT()
+	if d != nil {
 		defer func() {
-			dht.Save(dhtStatePath)
-			dht.Close()
+			d.Save(dhtStatePath)
+			d.Close()
 		}()
-		peerList = dhtPeers(dht, t.Info.InfoHash, peerList)
-		go dhtAnnounce(dht, t.Info.InfoHash, 6881)
+		peerList = dhtPeers(d, t.Info.InfoHash, peerList)
+		go dhtAnnounce(d, t.Info.InfoHash, 6881)
 	}
 
 	storageDir := defaultStorageDir()
@@ -204,7 +204,7 @@ func handleMagnetDownload(args []string) error {
 
 	logger.Log.Info("starting magnet download")
 
-	p, magnet, err := ConnectToMagnetPeer(magnetURL)
+	p, magnet, err := downloader.ConnectToMagnetPeer(magnetURL)
 	defer p.Conn.Close()
 
 	metadata, err := p.DownloadMetadata(magnet)
@@ -249,14 +249,14 @@ func handleMagnetDownload(args []string) error {
 	}
 
 	// DHT: bootstrap, discover additional peers, announce
-	dht := startDHT()
-	if dht != nil {
+	d := startDHT()
+	if d != nil {
 		defer func() {
-			dht.Save(dhtStatePath)
-			dht.Close()
+			d.Save(dhtStatePath)
+			d.Close()
 		}()
-		peerList = dhtPeers(dht, magnet.InfoHash, peerList)
-		go dhtAnnounce(dht, magnet.InfoHash, 6881)
+		peerList = dhtPeers(d, magnet.InfoHash, peerList)
+		go dhtAnnounce(d, magnet.InfoHash, 6881)
 	}
 
 	storageDir := defaultStorageDir()
@@ -284,48 +284,3 @@ func handleMagnetDownload(args []string) error {
 	return nil
 }
 
-func ConnectToMagnetPeer(magnetURL string) (*peer.Peer, *metainfo.MagnetLink, error) {
-	magnet, err := metainfo.DeserializeMagnet(magnetURL)
-	if err != nil {
-		return nil, nil, err
-	}
-	tr, err := tracker.NewMultiTracker(magnet.TrackerURLs)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	trReq := tracker.AnnounceRequest{
-		InfoHash:   magnet.InfoHash,
-		PeerID:     [20]byte{},
-		Uploaded:   0,
-		Downloaded: 0,
-		Left:       0,
-		Event:      0,
-	}
-
-	ann, err := tr.Announce(trReq)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	logger.Log.Debug("connecting to magnet peer", "addr", ann.Peers[0])
-
-	p := &peer.Peer{AddrPort: ann.Peers[0]}
-	if err = p.Connect(); err != nil {
-		return nil, nil, err
-	}
-
-	if _, err = p.MagnetHandshake(magnet.InfoHash); err != nil {
-		p.Conn.Close()
-		return nil, nil, err
-	}
-
-	if _, err = p.ReadBitfield(); err != nil {
-		p.Conn.Close()
-		return nil, nil, err
-	}
-
-	logger.Log.Debug("magnet peer ready", "addr", ann.Peers[0])
-
-	return p, magnet, nil
-}

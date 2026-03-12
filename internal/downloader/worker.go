@@ -7,10 +7,10 @@ import (
 	"net"
 	"time"
 
-	"github.com/leorafaelmb/BitTorrent-Client/internal"
-	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
-	"github.com/leorafaelmb/BitTorrent-Client/internal/metainfo"
-	"github.com/leorafaelmb/BitTorrent-Client/internal/peer"
+	"github.com/leorafaelmb/JellyTorrent/internal"
+	"github.com/leorafaelmb/JellyTorrent/internal/logger"
+	"github.com/leorafaelmb/JellyTorrent/internal/metainfo"
+	"github.com/leorafaelmb/JellyTorrent/internal/peer"
 )
 
 // Worker handles downloading pieces from a single peer
