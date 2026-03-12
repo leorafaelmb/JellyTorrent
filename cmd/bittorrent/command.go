@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"time"
@@ -29,6 +30,15 @@ func runCommand(command string, args []string) error {
 }
 
 var dhtStatePath = filepath.Join(os.TempDir(), "jellytorrent", "dht_state.dat")
+
+// defaultStorageDir returns ~/.jellytorrent/downloads/ as the base storage directory.
+func defaultStorageDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "jellytorrent", "downloads")
+	}
+	return filepath.Join(home, ".jellytorrent", "downloads")
+}
 
 // startDHT creates and bootstraps a DHT node. Returns the DHT instance
 // (caller must Close it) or nil if bootstrap fails.
@@ -163,9 +173,13 @@ func handleDownload(args []string) error {
 		go dhtAnnounce(dht, t.Info.InfoHash, 6881)
 	}
 
+	storageDir := defaultStorageDir()
+	logger.Log.Debug("storage directory", "path", filepath.Join(storageDir, hex.EncodeToString(t.Info.InfoHash[:])))
+
 	if err = downloader.DownloadFile(t, peerList, 50, downloadFilePath,
 		downloader.WithTracker(tr, announceReq),
 		downloader.WithAnnounceInterval(trackerResp.Interval),
+		downloader.WithStorageDir(storageDir),
 	); err != nil {
 		return err
 	}
@@ -245,9 +259,13 @@ func handleMagnetDownload(args []string) error {
 		go dhtAnnounce(dht, magnet.InfoHash, 6881)
 	}
 
+	storageDir := defaultStorageDir()
+	logger.Log.Debug("storage directory", "path", filepath.Join(storageDir, hex.EncodeToString(magnet.InfoHash[:])))
+
 	if err = downloader.DownloadFile(&t, peerList, 50, downloadFilePath,
 		downloader.WithTracker(tr, annReq),
 		downloader.WithAnnounceInterval(annResp.Interval),
+		downloader.WithStorageDir(storageDir),
 	); err != nil {
 		return err
 	}

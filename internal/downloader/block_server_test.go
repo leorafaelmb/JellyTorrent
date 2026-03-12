@@ -10,7 +10,7 @@ func TestGetPieceData_Completed(t *testing.T) {
 	pm := NewPieceManager([]PieceInfo{
 		{Index: 0, Hash: nil, Length: 100},
 		{Index: 1, Hash: nil, Length: 100},
-	}, &SequentialSelector{}, 0)
+	}, &SequentialSelector{}, 0, nil)
 
 	pm.Complete(0, []byte("piece-zero-data"))
 
@@ -23,7 +23,7 @@ func TestGetPieceData_Completed(t *testing.T) {
 func TestGetPieceData_NotCompleted(t *testing.T) {
 	pm := NewPieceManager([]PieceInfo{
 		{Index: 0, Hash: nil, Length: 100},
-	}, &SequentialSelector{}, 0)
+	}, &SequentialSelector{}, 0, nil)
 
 	_, ok := pm.GetPieceData(0)
 	if ok {
@@ -34,7 +34,7 @@ func TestGetPieceData_NotCompleted(t *testing.T) {
 func TestGetPieceData_OutOfRange(t *testing.T) {
 	pm := NewPieceManager([]PieceInfo{
 		{Index: 0, Hash: nil, Length: 100},
-	}, &SequentialSelector{}, 0)
+	}, &SequentialSelector{}, 0, nil)
 
 	_, ok := pm.GetPieceData(-1)
 	if ok {
@@ -50,7 +50,7 @@ func TestGetPieceData_OutOfRange(t *testing.T) {
 func TestBlockServer_GetBlock(t *testing.T) {
 	pm := NewPieceManager([]PieceInfo{
 		{Index: 0, Hash: nil, Length: 16},
-	}, &SequentialSelector{}, 0)
+	}, &SequentialSelector{}, 0, nil)
 
 	pm.Complete(0, []byte("0123456789abcdef"))
 
@@ -86,7 +86,7 @@ func TestProgress(t *testing.T) {
 		{Index: 0, Hash: nil, Length: 100},
 		{Index: 1, Hash: nil, Length: 100},
 		{Index: 2, Hash: nil, Length: 50},
-	}, &SequentialSelector{}, 0)
+	}, &SequentialSelector{}, 0, nil)
 
 	completed, total := pm.Progress()
 	if completed != 0 || total != 3 {
@@ -108,7 +108,7 @@ func TestEndgameAssignment(t *testing.T) {
 		{Index: 0, Hash: nil, Length: 100},
 		{Index: 1, Hash: nil, Length: 100},
 		{Index: 2, Hash: nil, Length: 100},
-	}, &SequentialSelector{}, 2)
+	}, &SequentialSelector{}, 2, nil)
 
 	// Bitfield: peer has all 3 pieces
 	bf := make(peer.BitField, 1)
@@ -162,7 +162,7 @@ func TestEndgameNotActiveAboveThreshold(t *testing.T) {
 		{Index: 2, Hash: nil, Length: 100},
 		{Index: 3, Hash: nil, Length: 100},
 		{Index: 4, Hash: nil, Length: 100},
-	}, &SequentialSelector{}, 2)
+	}, &SequentialSelector{}, 2, nil)
 
 	bf := make(peer.BitField, 1)
 	for i := 0; i < 5; i++ {
@@ -187,7 +187,7 @@ func TestEndgameNotActiveAboveThreshold(t *testing.T) {
 func TestEndgameCompleteIdempotent(t *testing.T) {
 	pm := NewPieceManager([]PieceInfo{
 		{Index: 0, Hash: nil, Length: 100},
-	}, &SequentialSelector{}, 1)
+	}, &SequentialSelector{}, 1, nil)
 
 	// Complete the same piece twice — should not panic or double-count
 	pm.Complete(0, []byte("data"))
@@ -203,7 +203,7 @@ func TestHaveSubscription(t *testing.T) {
 	pm := NewPieceManager([]PieceInfo{
 		{Index: 0, Hash: nil, Length: 100},
 		{Index: 1, Hash: nil, Length: 100},
-	}, &SequentialSelector{}, 0)
+	}, &SequentialSelector{}, 0, nil)
 
 	ch := pm.SubscribeHave()
 

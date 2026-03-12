@@ -6,6 +6,7 @@ import (
 
 	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/peer"
+	"github.com/leorafaelmb/BitTorrent-Client/internal/storage"
 )
 
 type PieceState int
@@ -30,6 +31,7 @@ type PieceManager struct {
 	owners       []string // peer addr that owns each InProgress piece
 	availability []int    // per-piece count of peers that have it
 	selector     PieceSelector
+	store        *storage.DiskStore
 
 	completed          int
 	total              int
@@ -46,20 +48,40 @@ type PieceManager struct {
 	haveSubs   []chan int
 }
 
-func NewPieceManager(pieces []PieceInfo, selector PieceSelector, endgameThreshold int) *PieceManager {
+func NewPieceManager(pieces []PieceInfo, selector PieceSelector, endgameThreshold int, store *storage.DiskStore) *PieceManager {
 	n := len(pieces)
-	return &PieceManager{
+	pm := &PieceManager{
 		pieces:           pieces,
 		states:           make([]PieceState, n),
 		data:             make([][]byte, n),
 		owners:           make([]string, n),
 		availability:     make([]int, n),
 		selector:         selector,
+		store:            store,
 		total:            n,
 		done:             make(chan struct{}),
 		endgameThreshold: endgameThreshold,
 		cancelChs:        make(map[int]chan struct{}),
 	}
+
+	// Resume: mark pieces already on disk as completed
+	if store != nil {
+		bf := store.CompletedBitfield()
+		for i, has := range bf {
+			if has {
+				pm.states[i] = PieceCompleted
+				pm.completed++
+			}
+		}
+		if pm.completed > 0 {
+			logger.Log.Info("resuming download", "completed", pm.completed, "total", pm.total)
+		}
+		if pm.completed == pm.total {
+			close(pm.done)
+		}
+	}
+
+	return pm
 }
 
 // Assign finds a Pending piece that the peer has and transitions it to InProgress.
@@ -138,6 +160,15 @@ func (pm *PieceManager) Complete(index int, data []byte) {
 	pm.owners[index] = ""
 	pm.completed++
 
+	// Persist to disk and free memory
+	if pm.store != nil {
+		if err := pm.store.WritePiece(index, data); err != nil {
+			logger.Log.Error("failed to write piece to disk", "piece", index, "error", err)
+		} else {
+			pm.data[index] = nil // data lives on disk now
+		}
+	}
+
 	// Close the cancel channel to notify endgame workers downloading this piece
 	if ch, ok := pm.cancelChs[index]; ok {
 		close(ch)
@@ -212,11 +243,29 @@ func (pm *PieceManager) Done() <-chan struct{} {
 	return pm.done
 }
 
-// Results returns the ordered piece data.
+// Results returns the ordered piece data, reading from disk as needed.
 func (pm *PieceManager) Results() [][]byte {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
-	return pm.data
+
+	if pm.store == nil {
+		return pm.data
+	}
+
+	result := make([][]byte, len(pm.data))
+	for i := range pm.data {
+		if pm.data[i] != nil {
+			result[i] = pm.data[i]
+		} else if pm.states[i] == PieceCompleted {
+			data, err := pm.store.ReadPiece(i)
+			if err != nil {
+				logger.Log.Error("failed to read piece from disk", "piece", i, "error", err)
+				continue
+			}
+			result[i] = data
+		}
+	}
+	return result
 }
 
 // HasPendingFor returns true if there are Pending pieces that the peer has.
@@ -283,6 +332,15 @@ func (pm *PieceManager) GetPieceData(index int) ([]byte, bool) {
 	}
 	if pm.states[index] != PieceCompleted {
 		return nil, false
+	}
+	// Data may be nil if it was freed after writing to disk
+	if pm.data[index] == nil && pm.store != nil {
+		data, err := pm.store.ReadPiece(index)
+		if err != nil {
+			logger.Log.Error("failed to read piece from disk", "piece", index, "error", err)
+			return nil, false
+		}
+		return data, true
 	}
 	return pm.data[index], true
 }

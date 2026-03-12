@@ -15,6 +15,7 @@ type Config struct {
 	Tracker           tracker.Tracker
 	AnnounceReq       tracker.AnnounceRequest
 	AnnounceInterval  time.Duration
+	StorageDir        string
 }
 
 func DefaultConfig() Config {
@@ -60,5 +61,11 @@ func WithTracker(tr tracker.Tracker, req tracker.AnnounceRequest) Option {
 func WithAnnounceInterval(d time.Duration) Option {
 	return func(c *Config) {
 		c.AnnounceInterval = d
+	}
+}
+
+func WithStorageDir(dir string) Option {
+	return func(c *Config) {
+		c.StorageDir = dir
 	}
 }

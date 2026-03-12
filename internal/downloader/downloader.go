@@ -11,6 +11,7 @@ import (
 	"github.com/leorafaelmb/BitTorrent-Client/internal/logger"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/metainfo"
 	"github.com/leorafaelmb/BitTorrent-Client/internal/peer"
+	"github.com/leorafaelmb/BitTorrent-Client/internal/storage"
 )
 
 type Downloader struct {
@@ -76,10 +77,20 @@ func (d *Downloader) Download() ([]byte, error) {
 		selector = &RarestFirstSelector{}
 	}
 
+	// Create disk store if storage dir is configured
+	var store *storage.DiskStore
+	if d.config.StorageDir != "" {
+		var err error
+		store, err = storage.NewDiskStore(d.config.StorageDir, d.torrent.Info.InfoHash, numPieces, int(pieceLength), d.torrent.Info.Length)
+		if err != nil {
+			logger.Log.Error("failed to create disk store, continuing without persistence", "error", err)
+		}
+	}
+
 	var wg sync.WaitGroup
 	numWorkers := min(d.config.MaxWorkers, len(d.peers))
 
-	d.pieceManager = NewPieceManager(pieces, selector, numWorkers)
+	d.pieceManager = NewPieceManager(pieces, selector, numWorkers, store)
 	d.results = make(chan *PieceResult, numPieces)
 
 	logger.Log.Info("starting download", "pieces", numPieces, "workers", numWorkers)
