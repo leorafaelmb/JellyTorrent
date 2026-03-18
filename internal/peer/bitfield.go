@@ -3,6 +3,11 @@ package peer
 // BitField is a compact representation of which pieces a peer has.
 type BitField []byte
 
+// NewBitField creates a zeroed bitfield for the given number of pieces.
+func NewBitField(numPieces int) BitField {
+	return make(BitField, (numPieces+7)/8)
+}
+
 // HasPiece checks if the bit at index is set.
 func (bf BitField) HasPiece(index int) bool {
 	byteIndex := index / 8

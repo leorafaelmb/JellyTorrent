@@ -345,6 +345,20 @@ func (pm *PieceManager) GetPieceData(index int) ([]byte, bool) {
 	return pm.data[index], true
 }
 
+// CompletedBitfield returns a wire-format BitField with bits set for all completed pieces.
+func (pm *PieceManager) CompletedBitfield() peer.BitField {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	bf := peer.NewBitField(pm.total)
+	for i, state := range pm.states {
+		if state == PieceCompleted {
+			bf.SetPiece(i)
+		}
+	}
+	return bf
+}
+
 // SubscribeHave returns a channel that receives piece indices as they complete.
 func (pm *PieceManager) SubscribeHave() chan int {
 	pm.haveSubsMu.Lock()

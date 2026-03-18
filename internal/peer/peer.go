@@ -145,6 +145,34 @@ func (p *Peer) SendNotInterested() error {
 	return p.SendOnly(internal.MessageNotInterested, nil)
 }
 
+// SendBitfield sends our bitfield to the remote peer.
+func (p *Peer) SendBitfield(bf BitField) error {
+	return p.SendOnly(internal.MessageBitfield, bf)
+}
+
+// SendChoke sends a choke message to the remote peer.
+func (p *Peer) SendChoke() error {
+	return p.SendOnly(internal.MessageChoke, nil)
+}
+
+// SendUnchoke sends an unchoke message to the remote peer.
+func (p *Peer) SendUnchoke() error {
+	return p.SendOnly(internal.MessageUnchoke, nil)
+}
+
+// SendHave sends a Have message for a specific piece index.
+func (p *Peer) SendHave(index uint32) error {
+	payload := make([]byte, 4)
+	binary.BigEndian.PutUint32(payload, index)
+	return p.SendOnly(internal.MessageHave, payload)
+}
+
+// SendKeepAlive sends a keep-alive message (zero-length).
+func (p *Peer) SendKeepAlive() error {
+	_, err := p.Conn.Write([]byte{0, 0, 0, 0})
+	return err
+}
+
 // HandleRequest processes an incoming Request message from a peer.
 // Silently ignores if BlockServer is nil, we're choking the peer, or the piece is unavailable.
 func (p *Peer) HandleRequest(payload []byte) error {

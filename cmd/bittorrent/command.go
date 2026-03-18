@@ -4,8 +4,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/leorafaelmb/JellyTorrent/internal/dht"
@@ -13,6 +16,8 @@ import (
 	"github.com/leorafaelmb/JellyTorrent/internal/logger"
 	"github.com/leorafaelmb/JellyTorrent/internal/metainfo"
 	"github.com/leorafaelmb/JellyTorrent/internal/peer"
+	"github.com/leorafaelmb/JellyTorrent/internal/seeder"
+	"github.com/leorafaelmb/JellyTorrent/internal/storage"
 	"github.com/leorafaelmb/JellyTorrent/internal/tracker"
 )
 
@@ -22,6 +27,8 @@ func runCommand(command string, args []string) error {
 		return handleDownload(args)
 	case "magnet_download":
 		return handleMagnetDownload(args)
+	case "seed":
+		return handleSeed(args)
 	default:
 
 	}
@@ -282,5 +289,124 @@ func handleMagnetDownload(args []string) error {
 	}
 
 	return nil
+}
+
+func handleSeed(args []string) error {
+	// Usage: seed -o <storage-dir> <torrent-file>
+	if len(args) < 4 {
+		return fmt.Errorf("usage: seed -o <storage-dir> <torrent-file>")
+	}
+
+	storageDir := args[2]
+	torrentFilePath := args[3]
+
+	t, err := metainfo.DeserializeTorrent(torrentFilePath)
+	if err != nil {
+		return err
+	}
+
+	pieceHashes := t.Info.PieceHashes()
+	numPieces := len(pieceHashes)
+	pieceLength := t.Info.PieceLength
+
+	logger.Log.Info("seeding",
+		"torrent", torrentFilePath,
+		"name", t.Info.Name,
+		"pieces", numPieces,
+	)
+
+	// Open existing DiskStore
+	store, err := storage.NewDiskStore(storageDir, t.Info.InfoHash, numPieces, pieceLength, t.Info.Length)
+	if err != nil {
+		return fmt.Errorf("failed to open storage: %w", err)
+	}
+
+	// Verify all pieces are present
+	bf := store.CompletedBitfield()
+	missing := 0
+	for _, has := range bf {
+		if !has {
+			missing++
+		}
+	}
+	if missing > 0 {
+		return fmt.Errorf("cannot seed: %d of %d pieces missing from storage", missing, numPieces)
+	}
+
+	// Build PieceManager with all pieces completed (for BlockServer)
+	pieces := make([]downloader.PieceInfo, numPieces)
+	for i := 0; i < numPieces; i++ {
+		length := uint32(pieceLength)
+		if i == numPieces-1 {
+			length = uint32(t.Info.Length) - uint32(pieceLength)*uint32(numPieces-1)
+		}
+		pieces[i] = downloader.PieceInfo{Index: i, Hash: pieceHashes[i], Length: length}
+	}
+	pm := downloader.NewPieceManager(pieces, &downloader.RarestFirstSelector{}, 0, store)
+	blockServer := downloader.NewBlockServer(pm)
+
+	// Create seeder
+	completedBitfield := pm.CompletedBitfield()
+	s := seeder.New(t.Info.InfoHash, numPieces, blockServer, completedBitfield, nil)
+
+	// Set up signal handling for graceful shutdown
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	// Start seeder in a goroutine so we can do DHT/tracker work
+	seederErr := make(chan error, 1)
+	go func() {
+		seederErr <- s.Run(ctx)
+	}()
+
+	// Wait briefly for listener to bind
+	time.Sleep(100 * time.Millisecond)
+
+	// DHT: bootstrap and announce with actual listen port
+	d := startDHT()
+	if d != nil {
+		defer func() {
+			d.Save(dhtStatePath)
+			d.Close()
+		}()
+		go dhtAnnounce(d, t.Info.InfoHash, s.ListenPort())
+
+		// Periodic DHT re-announce
+		go func() {
+			ticker := time.NewTicker(15 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					dhtAnnounce(d, t.Info.InfoHash, s.ListenPort())
+				}
+			}
+		}()
+	}
+
+	// Tracker announce with Left=0
+	seedTr, trErr := tracker.NewMultiTracker(t.TrackerURLs())
+	if trErr == nil {
+		annReq := tracker.AnnounceRequest{
+			InfoHash: t.Info.InfoHash,
+			Port:     uint16(s.ListenPort()),
+			Left:     0,
+			Event:    tracker.EventCompleted,
+		}
+		if _, err := seedTr.Announce(annReq); err != nil {
+			logger.Log.Debug("tracker announce failed", "error", err)
+		}
+
+		defer func() {
+			annReq.Event = tracker.EventStopped
+			seedTr.Announce(annReq)
+		}()
+	}
+
+	logger.Log.Info("seeding started, press Ctrl+C to stop", "port", s.ListenPort())
+
+	return <-seederErr
 }
 

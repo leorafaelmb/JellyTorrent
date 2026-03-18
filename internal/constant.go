@@ -1,5 +1,7 @@
 package internal
 
+import "time"
+
 // Peer ID used for all BitTorrent communications
 const PeerID = "leofeopeoluvsanayeli"
 
@@ -39,6 +41,25 @@ const (
 	DefaultCompact    = 1
 	ConnectionTimeout = 3 // seconds
 )
+
+// Seeder config
+const (
+	DefaultMaxSeedPeers           = 50
+	DefaultUnchokeSlots           = 4
+	DefaultUnchokeInterval        = 30 * time.Second
+	KeepAliveInterval             = 2 * time.Minute
+	HandshakeTimeout              = 3 * time.Second
+)
+
+// HandshakeDeadline returns a time.Time suitable for net.Conn.SetDeadline during handshake.
+func HandshakeDeadline() time.Time {
+	return time.Now().Add(HandshakeTimeout)
+}
+
+// ZeroDeadline returns the zero time, which clears any connection deadline.
+func ZeroDeadline() time.Time {
+	return time.Time{}
+}
 
 // Magnet Link Extension
 const (

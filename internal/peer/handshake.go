@@ -177,6 +177,34 @@ func readHandshake(conn net.Conn) (*Handshake, error) {
 	return h, err
 }
 
+// ServerHandshake handles an incoming connection's handshake.
+// Reads the remote peer's handshake first, validates the info hash, then responds with ours.
+func ServerHandshake(conn net.Conn, infoHash [20]byte) (*Peer, error) {
+	h, err := readHandshake(conn)
+	if err != nil {
+		return nil, fmt.Errorf("error reading incoming handshake: %w", err)
+	}
+	if h.InfoHash != infoHash {
+		return nil, fmt.Errorf("info hash mismatch: expected %x, got %x", infoHash, h.InfoHash)
+	}
+
+	msg, err := constructHandshakeMessage(infoHash, false)
+	if err != nil {
+		return nil, fmt.Errorf("error constructing handshake response: %w", err)
+	}
+	if _, err := conn.Write(msg); err != nil {
+		return nil, fmt.Errorf("error writing handshake response: %w", err)
+	}
+
+	p := &Peer{
+		Conn:      conn,
+		AmChoking: true, // per BT spec, start choked
+	}
+	copy(p.ID[:], h.PeerID[:])
+
+	return p, nil
+}
+
 func parseExtensionHandshake(payload []byte) (*ExtensionHandshakeResponse, error) {
 	decoded, err := bencode.Decode(payload[1:])
 	if err != nil {
