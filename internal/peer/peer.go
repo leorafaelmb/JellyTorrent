@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"sync"
 	"time"
 
 	"github.com/leorafaelmb/JellyTorrent/internal"
@@ -33,6 +34,11 @@ type Peer struct {
 	// Upload state
 	BlockServer BlockServer // nil means no upload support
 	AmChoking   bool        // whether we are choking this peer (starts true per BT spec)
+
+	// PEX (BEP 11)
+	UtPexID int              // remote peer's ut_pex message ID (0 = not supported)
+	OnPEX   func(*PEXMessage) // callback for incoming PEX messages; nil = ignore
+	writeMu sync.Mutex       // protects concurrent writes (PEX send goroutine + message loop)
 }
 
 // PeerMessage represents a message sent between peers after the handshake
@@ -69,7 +75,10 @@ func (p *Peer) SendMessage(messageID byte, payload []byte) (*PeerMessage, error)
 	message[4] = messageID
 	copy(message[5:], payload)
 
-	if _, err := p.Conn.Write(message); err != nil {
+	p.writeMu.Lock()
+	_, err := p.Conn.Write(message)
+	p.writeMu.Unlock()
+	if err != nil {
 		return nil, err
 	}
 
@@ -122,8 +131,15 @@ func (p *Peer) ReadBitfield() (*PeerMessage, error) {
 	return msg, nil
 }
 
-// SendOnly sends a message without reading a response.
+// SendOnly sends a message without reading a response. Thread-safe.
 func (p *Peer) SendOnly(messageID byte, payload []byte) error {
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
+	return p.sendOnly(messageID, payload)
+}
+
+// sendOnly sends a message without the write mutex (caller must hold it or guarantee no concurrent writes).
+func (p *Peer) sendOnly(messageID byte, payload []byte) error {
 	length := uint32(len(payload) + 1)
 	message := make([]byte, 4+length)
 	binary.BigEndian.PutUint32(message[0:4], length)
@@ -167,8 +183,10 @@ func (p *Peer) SendHave(index uint32) error {
 	return p.SendOnly(internal.MessageHave, payload)
 }
 
-// SendKeepAlive sends a keep-alive message (zero-length).
+// SendKeepAlive sends a keep-alive message (zero-length). Thread-safe.
 func (p *Peer) SendKeepAlive() error {
+	p.writeMu.Lock()
+	defer p.writeMu.Unlock()
 	_, err := p.Conn.Write([]byte{0, 0, 0, 0})
 	return err
 }
@@ -239,6 +257,8 @@ func (p *Peer) WaitForUnchoke() error {
 			if err := p.HandleRequest(msg.Payload); err != nil {
 				logger.Log.Debug("error serving request during unchoke wait", "peer", p.AddrPort, "error", err)
 			}
+		case internal.MessageExtension:
+			p.HandleExtension(msg.Payload)
 		}
 	}
 }
@@ -295,7 +315,10 @@ func (p *Peer) SendCancel(index, begin, length uint32) error {
 func (p *Peer) sendRequestOnly(index, begin, length uint32) error {
 	request := p.constructPieceRequest(index, begin, length)
 
-	if _, err := p.Conn.Write(request); err != nil {
+	p.writeMu.Lock()
+	_, err := p.Conn.Write(request)
+	p.writeMu.Unlock()
+	if err != nil {
 		return fmt.Errorf("error writing request to connection: %w", err)
 	}
 
@@ -369,6 +392,9 @@ func (p *Peer) getBlocks(requests []BlockRequest, cancelCh <-chan struct{}) ([][
 			if err := p.HandleRequest(msg.Payload); err != nil {
 				logger.Log.Debug("error serving request during download", "peer", p.AddrPort, "error", err)
 			}
+
+		case internal.MessageExtension:
+			p.HandleExtension(msg.Payload)
 
 		default:
 			// Ignore unknown messages
@@ -464,6 +490,10 @@ func (p *Peer) DownloadMetadata(magnet *metainfo.MagnetLink) (*metainfo.Info, er
 	extResp, err := p.ExtensionHandshake()
 	if err != nil {
 		return nil, fmt.Errorf("extension handshake failed: %w", err)
+	}
+
+	if extResp.UtMetadataID == 0 {
+		return nil, fmt.Errorf("peer does not support ut_metadata extension")
 	}
 
 	if extResp.MetadataSize == 0 {

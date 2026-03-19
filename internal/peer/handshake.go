@@ -57,6 +57,7 @@ func constructMagnetHandshakeMessage(infoHash [20]byte) []byte {
 type ExtensionHandshakeResponse struct {
 	MetadataSize     int
 	UtMetadataID     int
+	UtPexID          int
 	ExtensionMapping map[string]int
 }
 
@@ -122,7 +123,7 @@ func (p *Peer) MagnetHandshake(infoHash [20]byte) (*Handshake, error) {
 func (p *Peer) ExtensionHandshake() (*ExtensionHandshakeResponse, error) {
 	logger.Log.Debug("extension handshake", "peer", p.AddrPort)
 
-	payload := append([]byte{0}, []byte("d1:md11:ut_metadatai1eee")...)
+	payload := append([]byte{0}, []byte("d1:md11:ut_metadatai1e6:ut_pexi2eee")...)
 
 	// Message ID 20 for extension protocol
 	msg, err := p.SendMessage(20, payload)
@@ -179,21 +180,22 @@ func readHandshake(conn net.Conn) (*Handshake, error) {
 
 // ServerHandshake handles an incoming connection's handshake.
 // Reads the remote peer's handshake first, validates the info hash, then responds with ours.
-func ServerHandshake(conn net.Conn, infoHash [20]byte) (*Peer, error) {
+// Returns the Peer and the remote's Handshake (for checking extension support).
+func ServerHandshake(conn net.Conn, infoHash [20]byte) (*Peer, *Handshake, error) {
 	h, err := readHandshake(conn)
 	if err != nil {
-		return nil, fmt.Errorf("error reading incoming handshake: %w", err)
+		return nil, nil, fmt.Errorf("error reading incoming handshake: %w", err)
 	}
 	if h.InfoHash != infoHash {
-		return nil, fmt.Errorf("info hash mismatch: expected %x, got %x", infoHash, h.InfoHash)
+		return nil, nil, fmt.Errorf("info hash mismatch: expected %x, got %x", infoHash, h.InfoHash)
 	}
 
-	msg, err := constructHandshakeMessage(infoHash, false)
+	msg, err := constructHandshakeMessage(infoHash, true)
 	if err != nil {
-		return nil, fmt.Errorf("error constructing handshake response: %w", err)
+		return nil, nil, fmt.Errorf("error constructing handshake response: %w", err)
 	}
 	if _, err := conn.Write(msg); err != nil {
-		return nil, fmt.Errorf("error writing handshake response: %w", err)
+		return nil, nil, fmt.Errorf("error writing handshake response: %w", err)
 	}
 
 	p := &Peer{
@@ -202,7 +204,7 @@ func ServerHandshake(conn net.Conn, infoHash [20]byte) (*Peer, error) {
 	}
 	copy(p.ID[:], h.PeerID[:])
 
-	return p, nil
+	return p, h, nil
 }
 
 func parseExtensionHandshake(payload []byte) (*ExtensionHandshakeResponse, error) {
@@ -228,15 +230,14 @@ func parseExtensionHandshake(payload []byte) (*ExtensionHandshakeResponse, error
 		for key, val := range m {
 			if id, ok := val.(int); ok {
 				response.ExtensionMapping[key] = id
-				if key == "ut_metadata" {
+				switch key {
+				case "ut_metadata":
 					response.UtMetadataID = id
+				case "ut_pex":
+					response.UtPexID = id
 				}
 			}
 		}
-	}
-
-	if response.UtMetadataID == 0 {
-		return nil, fmt.Errorf("peer does not support ut_metadata extension")
 	}
 
 	return response, nil

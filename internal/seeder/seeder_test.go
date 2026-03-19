@@ -109,7 +109,7 @@ func TestServerHandshake(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		p, err := peer.ServerHandshake(server, infoHash)
+		p, _, err := peer.ServerHandshake(server, infoHash)
 		if err != nil {
 			done <- err
 			return
@@ -145,7 +145,7 @@ func TestServerHandshakeWrongHash(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := peer.ServerHandshake(server, infoHash)
+		_, _, err := peer.ServerHandshake(server, infoHash)
 		done <- err
 	}()
 

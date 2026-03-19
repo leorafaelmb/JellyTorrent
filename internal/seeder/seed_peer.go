@@ -60,6 +60,9 @@ func (sp *SeedPeer) serve(ctx context.Context) error {
 		case internal.MessageCancel:
 			// HandleRequest is synchronous, so cancels are no-ops
 
+		case internal.MessageExtension:
+			sp.peer.HandleExtension(msg.Payload)
+
 		default:
 			logger.Log.Debug("ignoring message from seed peer", "id", msg.ID, "peer", sp.peer.Conn.RemoteAddr())
 		}

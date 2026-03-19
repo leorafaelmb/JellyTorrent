@@ -16,7 +16,13 @@ go build -o /tmp/jellytorrent/ ./...
 # Download from a magnet link
 ./jellytorrent.sh magnet_download -o <destination> <magnet-link>
 
-# Run standalone DHT node
+# Seed a previously downloaded torrent (blocks until Ctrl+C)
+./jellytorrent.sh seed -o <storage-dir> <torrent-file>
+
+# Run DHT node via subcommand
+./jellytorrent.sh dht -port 6881 -state dht_state.dat
+
+# Or run standalone DHT daemon binary
 /tmp/jellytorrent/dhtd -port 6881 -state dht_state.dat
 
 # Enable debug logging
@@ -49,15 +55,25 @@ JELLYTORRENT_DEBUG=1 ./jellytorrent.sh download -o <destination> <torrent-file>
 - **Multi-tracker fallback** (BEP 12) — tries trackers in order from `announce-list`; falls back to the next on failure
 - **Tracker lifecycle** — sends `started`, periodic re-announces at the tracker's interval, `completed`, and `stopped` events
 
+### Peer Exchange (BEP 11)
+- PEX as a third peer discovery channel alongside trackers and DHT
+- Negotiated via extension handshake (BEP 10) — advertises `ut_pex` alongside `ut_metadata`
+- Delta-based: periodically sends added/dropped peers in compact format (every 60 seconds)
+- Dynamically spawns new download workers for PEX-discovered peers
+- Both downloader (leeching) and seeder participate in PEX
+
 ### File Support
 - `.torrent` file parsing (single-file and multi-file torrents)
 - Magnet link support with metadata download via the extension protocol (BEP 10)
 - Multi-tracker magnet links (multiple `tr` parameters)
 
-### Upload (Leeching)
-- Serves piece data to connected peers during download
+### Upload & Seeding
+- Serves piece data to connected peers during download (leeching upload)
 - Responds to incoming `Request` messages inline across all message loops
 - Broadcasts `Have` messages to connected peers as pieces complete
+- **Full seeding** via TCP listener for incoming connections (`seed` subcommand)
+- Round-robin choking algorithm with configurable unchoke slots
+- Disk-backed piece storage for download resume and seeding from disk
 
 ### Download Resume
 - Completed pieces are persisted to disk, enabling resume on restart
@@ -78,8 +94,9 @@ internal/
     token/                 Announce token management
   metainfo/                .torrent and magnet link parsing, piece hashing
   tracker/                 Tracker interface: HTTP, UDP, multi-tracker
-  peer/                    Peer wire protocol, handshake, block pipelining, uploads
-  downloader/              Download orchestrator, worker pool, piece manager
+  peer/                    Peer wire protocol, handshake, block pipelining, uploads, PEX
+  downloader/              Download orchestrator, worker pool, piece manager, PEX manager
+  seeder/                  TCP listener, choking algorithm, seed peer management
   storage/                 Disk-backed piece storage for download resume
   logger/                  Structured logging via slog
 ```
@@ -94,11 +111,10 @@ Sample `.torrent` files for testing are in the `torrents/` directory.
 
 ## TODO
 
-- **Full seeding** — accepting incoming peer connections via TCP listener
-- **PEX** (BEP 11) — peer exchange over existing connections
 - **Encryption** (MSE/PE) — message stream encryption for ISP throttling resistance
 - **uTP** (BEP 29) — UDP-based transport with built-in congestion control
-- **Bandwidth management** — upload/download rate limiting, tit-for-tat choke algorithm
+- **Persistent seeding daemon** — auto-start on boot, multi-torrent, launchd integration
+- **Bandwidth management** — upload/download rate limiting
 
 ## License
 

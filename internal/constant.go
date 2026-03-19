@@ -66,3 +66,10 @@ const (
 	ExtensionBitPosition = 5 // Reserved byte index for extension bit
 	ExtensionID          = 0x10
 )
+
+// PEX (Peer Exchange, BEP 11)
+const (
+	PEXInterval = 60 * time.Second // how often to send PEX messages
+	PEXMaxAdded = 50               // max added peers per PEX message
+	PEXLocalID  byte = 2           // our local ut_pex extension message ID
+)

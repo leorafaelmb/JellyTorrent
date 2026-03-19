@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"sync"
+	"time"
 
 	"github.com/leorafaelmb/JellyTorrent/internal"
 	"github.com/leorafaelmb/JellyTorrent/internal/logger"
@@ -148,7 +150,7 @@ func (s *Seeder) handleConn(ctx context.Context, conn net.Conn) {
 	// Set deadline for handshake
 	conn.SetDeadline(internal.HandshakeDeadline())
 
-	p, err := peer.ServerHandshake(conn, s.infoHash)
+	p, h, err := peer.ServerHandshake(conn, s.infoHash)
 	if err != nil {
 		logger.Log.Debug("incoming handshake failed", "addr", addr, "error", err)
 		return
@@ -169,6 +171,17 @@ func (s *Seeder) handleConn(ctx context.Context, conn net.Conn) {
 		return
 	}
 
+	// Extension handshake (BEP 10) — negotiate PEX if peer supports extensions
+	if h.Reserved[internal.ExtensionBitPosition]&internal.ExtensionID != 0 {
+		extResp, extErr := p.ExtensionHandshake()
+		if extErr != nil {
+			logger.Log.Debug("extension handshake failed (seed)", "addr", addr, "error", extErr)
+		} else if extResp.UtPexID > 0 {
+			p.UtPexID = extResp.UtPexID
+			logger.Log.Debug("PEX negotiated (seed)", "addr", addr, "remoteUtPexID", extResp.UtPexID)
+		}
+	}
+
 	// Set up upload support
 	p.BlockServer = s.blockServer
 
@@ -178,6 +191,11 @@ func (s *Seeder) handleConn(ctx context.Context, conn net.Conn) {
 	defer s.removePeer(addr)
 
 	logger.Log.Info("seed peer connected", "addr", addr)
+
+	// Start PEX send goroutine if peer supports it
+	if p.UtPexID > 0 {
+		go s.pexSendLoop(ctx, sp)
+	}
 
 	if err := sp.serve(ctx); err != nil {
 		select {
@@ -207,6 +225,78 @@ func (s *Seeder) getPeers() []*SeedPeer {
 	result := make([]*SeedPeer, 0, len(s.peers))
 	for _, sp := range s.peers {
 		result = append(result, sp)
+	}
+	return result
+}
+
+// pexSendLoop periodically sends PEX messages to a connected seed peer.
+func (s *Seeder) pexSendLoop(ctx context.Context, sp *SeedPeer) {
+	ticker := time.NewTicker(internal.PEXInterval)
+	defer ticker.Stop()
+
+	var lastSent map[string]bool
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			current := s.getPeerAddrs(sp.peer.Conn.RemoteAddr().String())
+
+			// Compute delta
+			var added []netip.AddrPort
+			for key, addr := range current {
+				if !lastSent[key] && len(added) < internal.PEXMaxAdded {
+					added = append(added, addr)
+				}
+			}
+			var dropped []netip.AddrPort
+			for key := range lastSent {
+				if _, ok := current[key]; !ok {
+					if addr, err := netip.ParseAddrPort(key); err == nil {
+						dropped = append(dropped, addr)
+					}
+				}
+			}
+
+			if len(added) == 0 && len(dropped) == 0 {
+				continue
+			}
+
+			msg := &peer.PEXMessage{
+				Added:   added,
+				AddedF:  make([]byte, len(added)),
+				Dropped: dropped,
+			}
+
+			sp.writeMu.Lock()
+			err := sp.peer.SendPEX(msg)
+			sp.writeMu.Unlock()
+			if err != nil {
+				logger.Log.Debug("failed to send PEX (seed)", "peer", sp.peer.Conn.RemoteAddr(), "error", err)
+				return
+			}
+
+			// Update lastSent for next delta
+			lastSent = make(map[string]bool, len(current))
+			for key := range current {
+				lastSent[key] = true
+			}
+		}
+	}
+}
+
+// getPeerAddrs returns a snapshot of connected peer addresses, excluding excludeAddr.
+func (s *Seeder) getPeerAddrs(excludeAddr string) map[string]netip.AddrPort {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result := make(map[string]netip.AddrPort, len(s.peers))
+	for addr, sp := range s.peers {
+		if addr == excludeAddr {
+			continue
+		}
+		result[addr] = sp.peer.AddrPort
 	}
 	return result
 }

@@ -3,6 +3,7 @@ package downloader
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sync"
@@ -22,7 +23,10 @@ type Downloader struct {
 	config  Config
 
 	pieceManager *PieceManager
+	pexManager   *PEXManager
 	results      chan *PieceResult
+
+	wg sync.WaitGroup
 
 	ctx        context.Context
 	cancelFunc context.CancelFunc
@@ -88,11 +92,17 @@ func (d *Downloader) Download() ([]byte, error) {
 		}
 	}
 
-	var wg sync.WaitGroup
 	numWorkers := min(d.config.MaxWorkers, len(d.peers))
 
 	d.pieceManager = NewPieceManager(pieces, selector, numWorkers, store)
 	d.results = make(chan *PieceResult, numPieces)
+
+	// Initialize PEX manager with initial peer addresses
+	initialAddrs := make([]netip.AddrPort, len(d.peers))
+	for i, p := range d.peers {
+		initialAddrs[i] = p.AddrPort
+	}
+	d.pexManager = NewPEXManager(initialAddrs)
 
 	logger.Log.Info("starting download", "pieces", numPieces, "workers", numWorkers)
 	logger.Log.Debug("piece manager initialized", "pieces", numPieces, "pieceLength", pieceLength)
@@ -108,22 +118,52 @@ func (d *Downloader) Download() ([]byte, error) {
 	}
 
 	for i := 0; i < numWorkers; i++ {
-		wg.Add(1)
+		d.wg.Add(1)
 		go func(p peer.Peer) {
-			defer wg.Done()
-			worker := NewWorker(&p, d.torrent, d.config)
+			defer d.wg.Done()
+			worker := NewWorker(&p, d.torrent, d.config, d.pexManager)
 			if err := worker.Run(d.ctx, d.pieceManager, d.results); err != nil {
 				logger.Log.Debug("worker error", "peer", p.AddrPort, "error", err)
 			}
 		}(d.peers[i])
 	}
 
+	// Start PEX worker spawner for dynamically discovered peers
+	go d.pexWorkerSpawner()
+
 	go func() {
-		wg.Wait()
+		d.wg.Wait()
 		close(d.results)
 	}()
 
 	return d.collectResults()
+}
+
+// pexWorkerSpawner reads from the PEX manager's discovered channel and spawns
+// new workers for previously unseen peers.
+func (d *Downloader) pexWorkerSpawner() {
+	for {
+		select {
+		case <-d.ctx.Done():
+			return
+		case <-d.pieceManager.Done():
+			return
+		case addr, ok := <-d.pexManager.Discovered():
+			if !ok {
+				return
+			}
+
+			p := peer.Peer{AddrPort: addr}
+			d.wg.Add(1)
+			go func() {
+				defer d.wg.Done()
+				worker := NewWorker(&p, d.torrent, d.config, d.pexManager)
+				if err := worker.Run(d.ctx, d.pieceManager, d.results); err != nil {
+					logger.Log.Debug("PEX worker error", "peer", addr, "error", err)
+				}
+			}()
+		}
+	}
 }
 
 // collectResults gathers downloaded pieces

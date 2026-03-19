@@ -15,10 +15,11 @@ import (
 
 // Worker handles downloading pieces from a single peer
 type Worker struct {
-	peer    *peer.Peer
-	torrent *metainfo.TorrentFile
-	config  Config
-	pm      *PieceManager
+	peer       *peer.Peer
+	torrent    *metainfo.TorrentFile
+	config     Config
+	pm         *PieceManager
+	pexManager *PEXManager
 
 	attempted  int
 	downloaded int
@@ -26,11 +27,12 @@ type Worker struct {
 }
 
 // NewWorker creates a new worker for a peer
-func NewWorker(p *peer.Peer, t *metainfo.TorrentFile, cfg Config) *Worker {
+func NewWorker(p *peer.Peer, t *metainfo.TorrentFile, cfg Config, pexMgr *PEXManager) *Worker {
 	return &Worker{
-		peer:    p,
-		torrent: t,
-		config:  cfg,
+		peer:       p,
+		torrent:    t,
+		config:     cfg,
+		pexManager: pexMgr,
 	}
 }
 
@@ -46,6 +48,18 @@ func (w *Worker) Run(ctx context.Context, pm *PieceManager, results chan<- *Piec
 
 	if err := w.setup(); err != nil {
 		return err
+	}
+
+	// Register with PEX manager
+	if w.pexManager != nil {
+		w.pexManager.PeerConnected(w.peer.AddrPort)
+	}
+
+	// Start PEX send goroutine if peer supports ut_pex
+	if w.peer.UtPexID > 0 && w.pexManager != nil {
+		pexCtx, pexCancel := context.WithCancel(ctx)
+		defer pexCancel()
+		go w.pexSendLoop(pexCtx)
 	}
 
 	pm.AddAvailability(w.peer.BitField)
@@ -77,7 +91,7 @@ func (w *Worker) connect(ctx context.Context) error {
 
 // setup performs handshake and initial protocol exchange
 func (w *Worker) setup() error {
-	_, err := w.peer.Handshake(w.torrent.Info.InfoHash, false)
+	h, err := w.peer.Handshake(w.torrent.Info.InfoHash, true)
 	if err != nil {
 		return &WorkerError{
 			PeerAddr: w.peer.AddrPort.String(),
@@ -92,6 +106,20 @@ func (w *Worker) setup() error {
 			PeerAddr: w.peer.AddrPort.String(),
 			Phase:    "bitfield",
 			Err:      err,
+		}
+	}
+
+	// Extension handshake (BEP 10) — negotiate ut_pex if peer supports extensions
+	if h.Reserved[internal.ExtensionBitPosition]&internal.ExtensionID != 0 {
+		extResp, extErr := w.peer.ExtensionHandshake()
+		if extErr != nil {
+			logger.Log.Debug("extension handshake failed", "peer", w.peer.AddrPort, "error", extErr)
+		} else {
+			w.peer.UtPexID = extResp.UtPexID
+			if extResp.UtPexID > 0 && w.pexManager != nil {
+				w.peer.OnPEX = w.pexManager.HandlePEX
+				logger.Log.Debug("PEX negotiated", "peer", w.peer.AddrPort, "remoteUtPexID", extResp.UtPexID)
+			}
 		}
 	}
 
@@ -265,6 +293,8 @@ func (w *Worker) waitForNewPieces(ctx context.Context, pm *PieceManager, haveCh 
 			if err := w.peer.HandleRequest(msg.Payload); err != nil {
 				logger.Log.Debug("error serving request during wait", "peer", w.peer.AddrPort, "error", err)
 			}
+		case internal.MessageExtension:
+			w.peer.HandleExtension(msg.Payload)
 		}
 	}
 }
@@ -286,6 +316,28 @@ func (w *Worker) sendPendingHaves(haveCh <-chan int) {
 	}
 }
 
+// pexSendLoop periodically sends PEX messages to this peer.
+func (w *Worker) pexSendLoop(ctx context.Context) {
+	ticker := time.NewTicker(internal.PEXInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			delta := w.pexManager.ComputeDelta(w.peer.AddrPort.String())
+			if len(delta.Added) == 0 && len(delta.Dropped) == 0 {
+				continue
+			}
+			if err := w.peer.SendPEX(delta); err != nil {
+				logger.Log.Debug("failed to send PEX", "peer", w.peer.AddrPort, "error", err)
+				return
+			}
+		}
+	}
+}
+
 // cleanup releases resources when the worker exits
 func (w *Worker) cleanup(pm *PieceManager) {
 	logger.Log.Info("worker finished",
@@ -294,6 +346,10 @@ func (w *Worker) cleanup(pm *PieceManager) {
 		"downloaded", w.downloaded,
 		"failed", w.failed,
 	)
+
+	if w.pexManager != nil {
+		w.pexManager.PeerDisconnected(w.peer.AddrPort)
+	}
 
 	pm.ReleaseAll(w.peer.AddrPort.String())
 	pm.RemoveAvailability(w.peer.BitField)
