@@ -26,6 +26,18 @@ func (b *Bucket) Insert(node *Node) (*Node, bool) {
 				return nil, true
 			}
 		}
+		// BEP 42: if the new node is compliant, evict the oldest non-compliant
+		// node to prefer verified nodes. When BEP 42 is off, all nodes have
+		// Compliant=false, so this branch never triggers.
+		if node.Compliant {
+			for i, n := range b.nodes {
+				if !n.Compliant {
+					b.nodes = append(b.nodes[:i], b.nodes[i+1:]...)
+					b.nodes = append(b.nodes, node)
+					return nil, true
+				}
+			}
+		}
 		// return oldest node, and false to indicate this node hasn't been added
 		return b.nodes[0], false
 	} else {

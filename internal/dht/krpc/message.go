@@ -13,6 +13,7 @@ type Message struct {
 	Args          map[string]any
 	Response      map[string]any
 	Error         []any
+	IP            []byte // BEP 42: querier's compact IP+port (top-level "ip" key)
 }
 
 func Unmarshal(data []byte) (*Message, error) {
@@ -90,6 +91,16 @@ func Unmarshal(data []byte) (*Message, error) {
 		return nil, fmt.Errorf("unknown message type: %s", msg.Type)
 	}
 
+	// BEP 42: extract optional top-level "ip" field.
+	if ipRaw, ok := dict["ip"]; ok {
+		switch v := ipRaw.(type) {
+		case string:
+			msg.IP = []byte(v)
+		case []byte:
+			msg.IP = v
+		}
+	}
+
 	return msg, nil
 }
 
@@ -109,6 +120,11 @@ func Marshal(msg *Message) ([]byte, error) {
 
 	case "e":
 		dict["e"] = msg.Error
+	}
+
+	// BEP 42: include "ip" field if set.
+	if msg.IP != nil {
+		dict["ip"] = string(msg.IP)
 	}
 
 	return bencode.Encode(dict)

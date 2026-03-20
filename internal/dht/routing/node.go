@@ -7,7 +7,8 @@ import (
 )
 
 type Node struct {
-	ID       nodeid.NodeID
-	Addr     netip.AddrPort
-	LastSeen time.Time
+	ID        nodeid.NodeID
+	Addr      netip.AddrPort
+	LastSeen  time.Time
+	Compliant bool // BEP 42: node ID derives from IP
 }

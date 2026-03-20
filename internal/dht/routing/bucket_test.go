@@ -134,3 +134,99 @@ func TestBucketOldestEmpty(t *testing.T) {
 		t.Error("oldest of empty bucket should be nil")
 	}
 }
+
+func TestBucketEvictsNonCompliantFirst(t *testing.T) {
+	b := NewBucket()
+
+	// Fill bucket: first 4 non-compliant, last 4 compliant.
+	for i := byte(0); i < 4; i++ {
+		n := makeNode(i)
+		n.Compliant = false
+		b.Insert(n)
+	}
+	for i := byte(4); i < K; i++ {
+		n := makeNode(i)
+		n.Compliant = true
+		b.Insert(n)
+	}
+
+	// Insert a new compliant node into the full bucket.
+	newNode := makeNode(0xff)
+	newNode.Compliant = true
+	evicted, ok := b.Insert(newNode)
+	if !ok {
+		t.Fatal("compliant node should evict a non-compliant node")
+	}
+	if evicted != nil {
+		t.Fatal("expected nil evicted return when BEP 42 eviction succeeds")
+	}
+	if b.Len() != K {
+		t.Errorf("bucket size should remain %d, got %d", K, b.Len())
+	}
+
+	// The evicted node should be the oldest non-compliant (node 0).
+	for _, n := range b.Nodes() {
+		if n.ID[0] == 0 {
+			t.Error("oldest non-compliant node (0) should have been evicted")
+		}
+	}
+
+	// The new node should be present.
+	found := false
+	for _, n := range b.Nodes() {
+		if n.ID[0] == 0xff {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("new compliant node should be in the bucket")
+	}
+}
+
+func TestBucketNoEvictionAllCompliant(t *testing.T) {
+	b := NewBucket()
+
+	// Fill bucket with all compliant nodes.
+	for i := byte(0); i < K; i++ {
+		n := makeNode(i)
+		n.Compliant = true
+		b.Insert(n)
+	}
+
+	// Insert a new compliant node — no non-compliant to evict,
+	// should fall back to returning oldest for ping-based eviction.
+	newNode := makeNode(0xff)
+	newNode.Compliant = true
+	oldest, ok := b.Insert(newNode)
+	if ok {
+		t.Error("insert should fail when all nodes are compliant and bucket is full")
+	}
+	if oldest == nil || oldest.ID[0] != 0 {
+		t.Error("should return oldest node for external eviction decision")
+	}
+	if b.Len() != K {
+		t.Errorf("bucket size should remain %d, got %d", K, b.Len())
+	}
+}
+
+func TestBucketNonCompliantNodeDoesNotEvict(t *testing.T) {
+	b := NewBucket()
+
+	// Fill bucket with non-compliant nodes.
+	for i := byte(0); i < K; i++ {
+		n := makeNode(i)
+		n.Compliant = false
+		b.Insert(n)
+	}
+
+	// Insert a new non-compliant node — should not trigger BEP 42 eviction.
+	newNode := makeNode(0xff)
+	newNode.Compliant = false
+	oldest, ok := b.Insert(newNode)
+	if ok {
+		t.Error("non-compliant node should not evict other non-compliant nodes via BEP 42")
+	}
+	if oldest == nil || oldest.ID[0] != 0 {
+		t.Error("should return oldest node")
+	}
+}

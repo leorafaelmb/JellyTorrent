@@ -11,11 +11,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/leorafaelmb/JellyTorrent/internal/bencode"
+	"github.com/leorafaelmb/JellyTorrent/internal/dht/hardening"
 	"github.com/leorafaelmb/JellyTorrent/internal/dht/krpc"
 	"github.com/leorafaelmb/JellyTorrent/internal/dht/nodeid"
 	"github.com/leorafaelmb/JellyTorrent/internal/dht/routing"
 	"github.com/leorafaelmb/JellyTorrent/internal/dht/token"
-	"github.com/leorafaelmb/JellyTorrent/internal/bencode"
 )
 
 const (
@@ -26,14 +27,17 @@ const (
 )
 
 type DHT struct {
-	id     nodeid.NodeID
-	table  *routing.RoutingTable
-	server *krpc.Server
-	tokens *token.TokenManager
-	peers  *PeerStore
-	config Config
-	stop   chan struct{}
-	wg     sync.WaitGroup
+	id         nodeid.NodeID
+	table      *routing.RoutingTable
+	server     *krpc.Server
+	tokens     *token.TokenManager
+	peers      *PeerStore
+	config     Config
+	stop       chan struct{}
+	wg         sync.WaitGroup
+	externalIP netip.Addr           // BEP 42: our external IP as seen by others
+	ipVotes    map[netip.Addr]int   // BEP 42: IP votes from bootstrap responses
+	ipVotesMu  sync.Mutex
 }
 
 func New(opts ...Option) (*DHT, error) {
@@ -44,11 +48,13 @@ func New(opts ...Option) (*DHT, error) {
 
 	id := nodeid.New()
 	var savedNodes []*routing.Node
+	var savedIP netip.Addr
 
 	if config.RoutingTablePath != "" {
-		if loadedID, nodes, err := loadRoutingTable(config.RoutingTablePath); err == nil {
-			id = loadedID
-			savedNodes = nodes
+		if state, err := loadRoutingTable(config.RoutingTablePath); err == nil {
+			id = state.id
+			savedNodes = state.nodes
+			savedIP = state.externalIP
 		}
 	}
 
@@ -61,12 +67,14 @@ func New(opts ...Option) (*DHT, error) {
 	peers := NewPeerStore(config.PeerTTL)
 
 	d := &DHT{
-		id:     id,
-		table:  table,
-		tokens: tokens,
-		peers:  peers,
-		config: config,
-		stop:   make(chan struct{}),
+		id:         id,
+		table:      table,
+		tokens:     tokens,
+		peers:      peers,
+		config:     config,
+		stop:       make(chan struct{}),
+		ipVotes:    make(map[netip.Addr]int),
+		externalIP: savedIP,
 	}
 
 	addr, err := netip.ParseAddrPort(fmt.Sprintf("0.0.0.0:%d", config.Port))
@@ -154,7 +162,9 @@ func (d *DHT) refreshTable() {
 }
 
 // Bootstrap populates the routing table by contacting bootstrap nodes
-// and performing a find_node lookup on our own ID.
+// and performing a find_node lookup on our own ID. When BEP 42 is enabled,
+// it collects external IP votes from responses and regenerates the node ID
+// to be compliant before performing the iterative lookup.
 func (d *DHT) Bootstrap(ctx context.Context) error {
 	for _, addr := range d.config.BootstrapNodes {
 		resolved, err := net.ResolveUDPAddr("udp", addr)
@@ -166,6 +176,15 @@ func (d *DHT) Bootstrap(ctx context.Context) error {
 		resp := d.sendFindNode(ctx, addrPort, d.id)
 		if resp == nil {
 			continue
+		}
+
+		// BEP 42: extract external IP from response and vote.
+		if d.config.BEP42 != BEP42Off && resp.IP != nil {
+			if extAddr, ok := parseCompactAddr(resp.IP); ok {
+				if consensus, ok := d.voteExternalIP(extAddr.Addr()); ok && !d.externalIP.IsValid() {
+					d.regenerateCompliantID(consensus)
+				}
+			}
 		}
 
 		// Insert the bootstrap node itself into our routing table.
@@ -386,6 +405,13 @@ func (d *DHT) Save(path string) error {
 		"id":    string(d.id[:]),
 		"nodes": compactNodes(nodes),
 	}
+
+	// BEP 42: persist external IP so the saved ID can be validated on reload.
+	if d.externalIP.IsValid() {
+		ip4 := d.externalIP.As4()
+		dict["external_ip"] = string(ip4[:])
+	}
+
 	data, err := bencode.Encode(dict)
 	if err != nil {
 		return fmt.Errorf("encode routing table: %w", err)
@@ -401,30 +427,55 @@ func (d *DHT) Save(path string) error {
 	return nil
 }
 
+// savedState holds the deserialized routing table data from disk.
+type savedState struct {
+	id         nodeid.NodeID
+	nodes      []*routing.Node
+	externalIP netip.Addr
+}
+
 // loadRoutingTable reads a persisted routing table from disk.
-func loadRoutingTable(path string) (nodeid.NodeID, []*routing.Node, error) {
+func loadRoutingTable(path string) (*savedState, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nodeid.NodeID{}, nil, err
+		return nil, err
 	}
 
 	decoded, err := bencode.Decode(data)
 	if err != nil {
-		return nodeid.NodeID{}, nil, fmt.Errorf("decode routing table: %w", err)
+		return nil, fmt.Errorf("decode routing table: %w", err)
 	}
 
 	dict, ok := decoded.(map[string]interface{})
 	if !ok {
-		return nodeid.NodeID{}, nil, fmt.Errorf("routing table is not a dict")
+		return nil, fmt.Errorf("routing table is not a dict")
 	}
 
 	id, err := bytesFromArgs(dict, "id")
 	if err != nil {
-		return nodeid.NodeID{}, nil, fmt.Errorf("routing table missing id: %w", err)
+		return nil, fmt.Errorf("routing table missing id: %w", err)
 	}
 
-	nodes := parseCompactNodes(dict["nodes"])
-	return id, nodes, nil
+	state := &savedState{
+		id:    id,
+		nodes: parseCompactNodes(dict["nodes"]),
+	}
+
+	// BEP 42: restore external IP if present.
+	if raw, ok := dict["external_ip"]; ok {
+		var ipBytes []byte
+		switch v := raw.(type) {
+		case string:
+			ipBytes = []byte(v)
+		case []byte:
+			ipBytes = v
+		}
+		if len(ipBytes) == 4 {
+			state.externalIP = netip.AddrFrom4([4]byte(ipBytes))
+		}
+	}
+
+	return state, nil
 }
 
 // --- Iterative lookup ---
@@ -561,10 +612,26 @@ func (d *DHT) handleQuery(msg *krpc.Message, addr netip.AddrPort) {
 	if err != nil {
 		return
 	}
+
+	compliant := true
+	if d.config.BEP42 != BEP42Off {
+		compliant = hardening.ValidateNodeID(senderID, addr.Addr())
+		if !compliant {
+			d.config.Logger.Debug("BEP 42 non-compliant node",
+				"id", senderID.String(),
+				"addr", addr.String(),
+			)
+			if d.config.BEP42 == BEP42Enforce {
+				return // drop query from non-compliant node
+			}
+		}
+	}
+
 	d.table.Insert(&routing.Node{
-		ID:       senderID,
-		Addr:     addr,
-		LastSeen: time.Now(),
+		ID:        senderID,
+		Addr:      addr,
+		LastSeen:  time.Now(),
+		Compliant: compliant,
 	})
 
 	switch msg.QueryMethod {
@@ -583,6 +650,7 @@ func (d *DHT) handlePing(msg *krpc.Message, addr netip.AddrPort) {
 	resp := &krpc.Message{
 		TransactionID: msg.TransactionID,
 		Type:          "r",
+		IP:            compactAddr(addr),
 		Response: map[string]any{
 			"id": string(d.id[:]),
 		},
@@ -601,6 +669,7 @@ func (d *DHT) handleFindNode(msg *krpc.Message, addr netip.AddrPort) {
 	resp := &krpc.Message{
 		TransactionID: msg.TransactionID,
 		Type:          "r",
+		IP:            compactAddr(addr),
 		Response: map[string]any{
 			"id":    string(d.id[:]),
 			"nodes": compactNodes(closest),
@@ -619,6 +688,7 @@ func (d *DHT) handleGetPeers(msg *krpc.Message, addr netip.AddrPort) {
 	resp := &krpc.Message{
 		TransactionID: msg.TransactionID,
 		Type:          "r",
+		IP:            compactAddr(addr),
 		Response: map[string]any{
 			"id":    string(d.id[:]),
 			"token": string(tok[:]),
@@ -670,6 +740,7 @@ func (d *DHT) handleAnnouncePeer(msg *krpc.Message, addr netip.AddrPort) {
 	resp := &krpc.Message{
 		TransactionID: msg.TransactionID,
 		Type:          "r",
+		IP:            compactAddr(addr),
 		Response: map[string]any{
 			"id": string(d.id[:]),
 		},
@@ -734,6 +805,80 @@ func fixed20FromArgs(args map[string]any, key string) ([20]byte, error) {
 	var out [20]byte
 	copy(out[:], b)
 	return out, nil
+}
+
+// --- BEP 42 helpers ---
+
+// compactAddr encodes an AddrPort as 6 bytes (4 IP + 2 port) for the BEP 42 "ip" field.
+func compactAddr(addr netip.AddrPort) []byte {
+	ip4 := addr.Addr().As4()
+	var buf [6]byte
+	copy(buf[:4], ip4[:])
+	binary.BigEndian.PutUint16(buf[4:6], addr.Port())
+	return buf[:]
+}
+
+// parseCompactAddr decodes a 6-byte compact address into an AddrPort.
+func parseCompactAddr(data []byte) (netip.AddrPort, bool) {
+	if len(data) != 6 {
+		return netip.AddrPort{}, false
+	}
+	ip := netip.AddrFrom4([4]byte(data[:4]))
+	port := binary.BigEndian.Uint16(data[4:6])
+	return netip.AddrPortFrom(ip, port), true
+}
+
+// voteExternalIP records an external IP vote from a bootstrap response.
+// Returns the consensus IP once >= 3 nodes agree.
+func (d *DHT) voteExternalIP(ip netip.Addr) (netip.Addr, bool) {
+	d.ipVotesMu.Lock()
+	defer d.ipVotesMu.Unlock()
+	d.ipVotes[ip]++
+
+	var bestIP netip.Addr
+	bestCount := 0
+	for addr, count := range d.ipVotes {
+		if count > bestCount {
+			bestIP = addr
+			bestCount = count
+		}
+	}
+	if bestCount >= 3 {
+		return bestIP, true
+	}
+	return netip.Addr{}, false
+}
+
+// regenerateCompliantID generates a BEP 42 compliant node ID for the given
+// external IP, rebuilds the routing table, and re-inserts existing nodes.
+func (d *DHT) regenerateCompliantID(ip netip.Addr) {
+	newID, err := hardening.GenerateCompliantID(ip)
+	if err != nil {
+		d.config.Logger.Warn("BEP 42: failed to generate compliant ID", "err", err)
+		return
+	}
+
+	oldID := d.id
+	nodes := d.table.Snapshot()
+
+	d.id = newID
+	d.externalIP = ip
+	d.table = routing.NewRoutingTable(newID)
+
+	// Re-insert existing nodes with BEP 42 validation.
+	for _, n := range nodes {
+		if d.config.BEP42 != BEP42Off {
+			n.Compliant = hardening.ValidateNodeID(n.ID, n.Addr.Addr())
+		}
+		d.table.Insert(n)
+	}
+
+	d.config.Logger.Info("BEP 42: regenerated compliant node ID",
+		"old_id", oldID.String(),
+		"new_id", newID.String(),
+		"external_ip", ip.String(),
+		"reinserted_nodes", len(nodes),
+	)
 }
 
 // --- Compact encoding/decoding ---

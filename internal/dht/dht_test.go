@@ -3,8 +3,12 @@ package dht
 import (
 	"context"
 	"net/netip"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/leorafaelmb/JellyTorrent/internal/dht/hardening"
+	"github.com/leorafaelmb/JellyTorrent/internal/dht/routing"
 )
 
 func newTestDHT(t *testing.T) *DHT {
@@ -153,4 +157,206 @@ func TestDHTCloseIsClean(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Close returned error: %v", err)
 	}
+}
+
+// --- BEP 42 integration tests ---
+
+func newTestDHTWithBEP42(t *testing.T, mode BEP42Mode) *DHT {
+	t.Helper()
+	d, err := New(
+		WithPort(0),
+		WithBootstrapNodes(nil),
+		WithBEP42(mode),
+	)
+	if err != nil {
+		t.Fatalf("failed to create DHT: %v", err)
+	}
+	return d
+}
+
+func TestBEP42HandleQueryEnforce(t *testing.T) {
+	a := newTestDHTWithBEP42(t, BEP42Enforce)
+	defer a.Close()
+	b := newTestDHT(t) // B has a random (non-compliant) ID
+	defer b.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// B sends a query to A. Since B's ID is random (non-compliant),
+	// A in Enforce mode should drop it and not insert B.
+	b.config.BootstrapNodes = []string{localAddr(a)}
+	b.Bootstrap(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	// A should not have inserted B's non-compliant ID.
+	if a.table.NumNodes() != 0 {
+		t.Errorf("BEP42Enforce: expected 0 nodes in A's table, got %d", a.table.NumNodes())
+	}
+}
+
+func TestBEP42HandleQueryLog(t *testing.T) {
+	a := newTestDHTWithBEP42(t, BEP42Log)
+	defer a.Close()
+	b := newTestDHT(t) // B has a random (non-compliant) ID
+	defer b.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// B sends a query to A. In Log mode, A should insert B but mark as non-compliant.
+	b.config.BootstrapNodes = []string{localAddr(a)}
+	b.Bootstrap(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	if a.table.NumNodes() == 0 {
+		t.Fatal("BEP42Log: A should have inserted B's node")
+	}
+
+	// Verify the node is marked as non-compliant.
+	nodes := a.table.Snapshot()
+	for _, n := range nodes {
+		if n.ID == b.id && n.Compliant {
+			t.Error("BEP42Log: B's node should be marked non-compliant")
+		}
+	}
+}
+
+func TestBEP42IPFieldInResponse(t *testing.T) {
+	a := newTestDHT(t)
+	defer a.Close()
+	b := newTestDHT(t)
+	defer b.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Send a find_node from B to A and check the response has an IP field.
+	aAddr := netip.MustParseAddrPort(localAddr(a))
+	resp := b.sendFindNode(ctx, aAddr, b.id)
+	if resp == nil {
+		t.Fatal("expected response from A")
+	}
+
+	if resp.IP == nil {
+		t.Fatal("response should contain BEP 42 IP field")
+	}
+
+	addr, ok := parseCompactAddr(resp.IP)
+	if !ok {
+		t.Fatal("failed to parse compact addr from IP field")
+	}
+
+	// The IP field should contain B's address as seen by A.
+	if addr.Addr() != netip.MustParseAddr("127.0.0.1") {
+		t.Errorf("IP field addr = %s, want 127.0.0.1", addr.Addr())
+	}
+}
+
+func TestBEP42SaveLoadExternalIP(t *testing.T) {
+	d := newTestDHT(t)
+	d.externalIP = netip.MustParseAddr("203.0.113.42")
+	defer d.Close()
+
+	tmp := filepath.Join(t.TempDir(), "state.dat")
+	if err := d.Save(tmp); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	state, err := loadRoutingTable(tmp)
+	if err != nil {
+		t.Fatalf("loadRoutingTable failed: %v", err)
+	}
+
+	if state.externalIP != d.externalIP {
+		t.Errorf("external IP not preserved: got %s, want %s", state.externalIP, d.externalIP)
+	}
+}
+
+func TestBEP42CompliantNodeEvictsNonCompliant(t *testing.T) {
+	ip := netip.MustParseAddr("124.31.75.21")
+
+	// Generate a compliant ID for a known IP.
+	compliantID, err := hardening.GenerateCompliantID(ip)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a routing table and fill a bucket with non-compliant nodes.
+	rt := routing.NewRoutingTable(compliantID)
+
+	// Find a bucket that we can fill. Insert nodes with non-compliant IDs
+	// that land in the same bucket.
+	bucketFilled := false
+	var targetBucket int
+	for targetBucket = 0; targetBucket < 159; targetBucket++ {
+		// Generate 8 nodes for this bucket distance.
+		inserted := 0
+		for attempt := 0; attempt < 200 && inserted < routing.K; attempt++ {
+			fakeID := makeIDInBucket(compliantID, targetBucket)
+			n := &routing.Node{
+				ID:        fakeID,
+				Addr:      netip.MustParseAddrPort("10.0.0.1:6881"),
+				LastSeen:  time.Now(),
+				Compliant: false,
+			}
+			_, ok := rt.Insert(n)
+			if ok {
+				inserted++
+			}
+		}
+		if inserted == routing.K {
+			bucketFilled = true
+			break
+		}
+	}
+
+	if !bucketFilled {
+		t.Skip("could not fill a bucket for eviction test")
+	}
+
+	before := rt.NumNodes()
+
+	// Now insert a compliant node into the same bucket.
+	compliantNodeID := makeIDInBucket(compliantID, targetBucket)
+	compliantNode := &routing.Node{
+		ID:        compliantNodeID,
+		Addr:      netip.MustParseAddrPort("10.0.0.2:6881"),
+		LastSeen:  time.Now(),
+		Compliant: true,
+	}
+	_, ok := rt.Insert(compliantNode)
+	if !ok {
+		t.Error("compliant node should have been inserted by evicting a non-compliant node")
+	}
+
+	// Total should remain the same (one evicted, one inserted).
+	if rt.NumNodes() != before {
+		t.Errorf("expected %d nodes, got %d", before, rt.NumNodes())
+	}
+}
+
+// makeIDInBucket creates a random NodeID that falls into the given bucket
+// relative to self (i.e., PrefixLen(self, result) == bucket).
+func makeIDInBucket(self [20]byte, bucket int) [20]byte {
+	// XOR distance must have exactly `bucket` leading zero bits.
+	var id [20]byte
+	// Copy self first.
+	copy(id[:], self[:])
+
+	// The bit at position `bucket` in the XOR distance must be 1.
+	// All bits before it must be 0 (same as self).
+	// Bits after it can be random.
+	byteIdx := bucket / 8
+	bitIdx := uint(7 - (bucket % 8))
+
+	// Flip the target bit to ensure XOR has a 1 there.
+	id[byteIdx] ^= 1 << bitIdx
+
+	// Randomize all bytes after byteIdx to avoid duplicate IDs.
+	for i := byteIdx + 1; i < 20; i++ {
+		id[i] = self[i] ^ byte(int(i)+bucket) // deterministic but varied
+	}
+
+	return id
 }
