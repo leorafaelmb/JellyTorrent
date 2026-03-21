@@ -855,6 +855,11 @@ func (d *DHT) handleFindNode(msg *krpc.Message, addr netip.AddrPort) {
 		return
 	}
 
+	d.config.Logger.Debug("find_node target",
+		"addr", addr.String(),
+		"target", target.String(),
+	)
+
 	closest := d.table.FindClosest(target, routing.K)
 
 	resp := &krpc.Message{
@@ -874,6 +879,11 @@ func (d *DHT) handleGetPeers(msg *krpc.Message, addr netip.AddrPort) {
 	if err != nil {
 		return
 	}
+
+	d.config.Logger.Debug("get_peers info_hash",
+		"addr", addr.String(),
+		"info_hash", hex.EncodeToString(infoHash[:]),
+	)
 
 	tok := d.tokens.Generate(addr.Addr())
 	resp := &krpc.Message{
