@@ -336,6 +336,82 @@ func TestBEP42CompliantNodeEvictsNonCompliant(t *testing.T) {
 	}
 }
 
+// --- Rate limiting integration tests ---
+
+func TestRateLimitDropsExcessQueries(t *testing.T) {
+	// Target with a very low rate limit: 5 queries per 1-second window.
+	target, err := New(
+		WithPort(0),
+		WithBootstrapNodes(nil),
+		WithRateLimit(5, 1*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("failed to create target DHT: %v", err)
+	}
+	defer target.Close()
+
+	sender := newTestDHT(t)
+	defer sender.Close()
+
+	targetAddr := netip.MustParseAddrPort(localAddr(target))
+
+	// Send 10 rapid queries with short timeouts so all complete well within
+	// the 1-second window (avoids sliding window decay letting extras through).
+	responded := 0
+	for i := 0; i < 10; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		resp := sender.sendFindNode(ctx, targetAddr, sender.id)
+		cancel()
+		if resp != nil {
+			responded++
+		}
+	}
+
+	if responded > 5 {
+		t.Errorf("expected at most 5 responses (rate limit), got %d", responded)
+	}
+	if responded < 3 {
+		t.Errorf("expected at least 3 responses before hitting rate limit, got %d", responded)
+	}
+}
+
+func TestRateLimitDisabledWithZero(t *testing.T) {
+	// Rate limiting disabled: all queries should be allowed.
+	target, err := New(
+		WithPort(0),
+		WithBootstrapNodes(nil),
+		WithRateLimit(0, 0),
+	)
+	if err != nil {
+		t.Fatalf("failed to create target DHT: %v", err)
+	}
+	defer target.Close()
+
+	if target.rateLimiter != nil {
+		t.Error("rateLimiter should be nil when limit is 0")
+	}
+
+	sender := newTestDHT(t)
+	defer sender.Close()
+
+	targetAddr := netip.MustParseAddrPort(localAddr(target))
+
+	// Send 20 rapid queries — all should get responses.
+	responded := 0
+	for i := 0; i < 20; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		resp := sender.sendFindNode(ctx, targetAddr, sender.id)
+		cancel()
+		if resp != nil {
+			responded++
+		}
+	}
+
+	if responded < 15 {
+		t.Errorf("expected most queries to succeed with rate limiting disabled, got %d/20", responded)
+	}
+}
+
 // makeIDInBucket creates a random NodeID that falls into the given bucket
 // relative to self (i.e., PrefixLen(self, result) == bucket).
 func makeIDInBucket(self [20]byte, bucket int) [20]byte {

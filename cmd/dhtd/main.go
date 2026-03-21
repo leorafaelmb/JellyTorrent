@@ -21,6 +21,7 @@ func main() {
 	logPath := flag.String("log", "", "path to JSON log file (default: stderr)")
 	statePath := flag.String("state", "dht_state.dat", "path to routing table persistence file")
 	infohashFlag := flag.String("infohash", "", "comma-separated hex info hashes to announce")
+	rateLimit := flag.Int("ratelimit", 50, "max DHT queries per minute per IP (0 to disable)")
 	flag.Parse()
 
 	logger := setupLogger(*logPath)
@@ -49,6 +50,7 @@ func main() {
 		dht.WithPort(*port),
 		dht.WithLogger(logger),
 		dht.WithRoutingTable(*statePath),
+		dht.WithRateLimit(*rateLimit, 1*time.Minute),
 	)
 	if err != nil {
 		logger.Error("failed to create DHT", "error", err)

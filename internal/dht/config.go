@@ -24,6 +24,8 @@ type Config struct {
 	Logger           *slog.Logger
 	RoutingTablePath string
 	BEP42            BEP42Mode
+	RateLimit        int           // max queries per window per IP (0 = disabled)
+	RateLimitWin     time.Duration // rate limit window duration
 }
 
 func DefaultConfig() Config {
@@ -37,7 +39,9 @@ func DefaultConfig() Config {
 		Alpha:   3,
 		K:       routing.K,
 		PeerTTL: 30 * time.Minute,
-		Logger:  slog.Default(),
+		Logger:       slog.Default(),
+		RateLimit:    50,
+		RateLimitWin: 1 * time.Minute,
 	}
 }
 
@@ -80,5 +84,14 @@ func WithRoutingTable(path string) Option {
 func WithBEP42(mode BEP42Mode) Option {
 	return func(c *Config) {
 		c.BEP42 = mode
+	}
+}
+
+func WithRateLimit(limit int, window time.Duration) Option {
+	return func(c *Config) {
+		c.RateLimit = limit
+		if window > 0 {
+			c.RateLimitWin = window
+		}
 	}
 }

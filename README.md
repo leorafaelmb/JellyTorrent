@@ -49,6 +49,8 @@ JELLYTORRENT_DEBUG=1 ./jellytorrent.sh download -o <destination> <torrent-file>
 - KRPC protocol over UDP
 - Routing table persistence across restarts
 - Standalone DHT daemon (`dhtd`) for running an independent node
+- **BEP 42 node ID restrictions** — validates node IDs derive from IP addresses via CRC32C to resist Sybil attacks; three enforcement modes (off, log, enforce); compliant nodes evict non-compliant from full buckets; external IP discovery via bootstrap consensus
+- **Per-IP rate limiting** — sliding window counter drops queries from IPs exceeding a configurable threshold (default 50/min); protects against query flooding and UDP amplification; `-ratelimit` flag to configure or disable
 
 ### Tracker Support
 - HTTP and UDP tracker protocols (announce and scrape)
@@ -88,6 +90,7 @@ cmd/
 internal/
   bencode/                 Bencode encoder/decoder
   dht/                     Kademlia DHT (BEP 5)
+    hardening/             BEP 42 node ID restrictions, per-IP rate limiting
     krpc/                  KRPC protocol messages
     nodeid/                Node ID generation and XOR distance
     routing/               K-bucket routing table

@@ -35,9 +35,10 @@ type DHT struct {
 	config     Config
 	stop       chan struct{}
 	wg         sync.WaitGroup
-	externalIP netip.Addr           // BEP 42: our external IP as seen by others
-	ipVotes    map[netip.Addr]int   // BEP 42: IP votes from bootstrap responses
-	ipVotesMu  sync.Mutex
+	externalIP  netip.Addr              // BEP 42: our external IP as seen by others
+	ipVotes     map[netip.Addr]int    // BEP 42: IP votes from bootstrap responses
+	ipVotesMu   sync.Mutex
+	rateLimiter *hardening.RateLimiter // nil if rate limiting disabled
 }
 
 func New(opts ...Option) (*DHT, error) {
@@ -66,15 +67,21 @@ func New(opts ...Option) (*DHT, error) {
 	tokens := token.New()
 	peers := NewPeerStore(config.PeerTTL)
 
+	var rl *hardening.RateLimiter
+	if config.RateLimit > 0 {
+		rl = hardening.NewRateLimiter(config.RateLimit, config.RateLimitWin, 100000)
+	}
+
 	d := &DHT{
-		id:         id,
-		table:      table,
-		tokens:     tokens,
-		peers:      peers,
-		config:     config,
-		stop:       make(chan struct{}),
-		ipVotes:    make(map[netip.Addr]int),
-		externalIP: savedIP,
+		id:          id,
+		table:       table,
+		tokens:      tokens,
+		peers:       peers,
+		config:      config,
+		stop:        make(chan struct{}),
+		ipVotes:     make(map[netip.Addr]int),
+		externalIP:  savedIP,
+		rateLimiter: rl,
 	}
 
 	addr, err := netip.ParseAddrPort(fmt.Sprintf("0.0.0.0:%d", config.Port))
@@ -150,6 +157,24 @@ func (d *DHT) startMaintenance() {
 			}
 		}
 	}()
+
+	// Rate limiter cleanup: periodically sweep expired per-IP counters.
+	if d.rateLimiter != nil {
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			ticker := time.NewTicker(d.config.RateLimitWin)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					d.rateLimiter.Cleanup()
+				case <-d.stop:
+					return
+				}
+			}
+		}()
+	}
 }
 
 // refreshTable performs a find_node lookup on a random target to keep
@@ -608,6 +633,14 @@ func (d *DHT) sendQuery(ctx context.Context, msg *krpc.Message, addr netip.AddrP
 // --- Query handlers ---
 
 func (d *DHT) handleQuery(msg *krpc.Message, addr netip.AddrPort) {
+	if d.rateLimiter != nil && !d.rateLimiter.Allow(addr.Addr()) {
+		d.config.Logger.Debug("rate limited query",
+			"addr", addr.String(),
+			"method", msg.QueryMethod,
+		)
+		return
+	}
+
 	senderID, err := nodeIDFromArgs(msg.Args)
 	if err != nil {
 		return
