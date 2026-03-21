@@ -422,6 +422,7 @@ func handleDHT(args []string) error {
 	statePath := fs.String("state", "dht_state.dat", "path to routing table persistence file")
 	infohashFlag := fs.String("infohash", "", "comma-separated hex info hashes to announce")
 	rateLimit := fs.Int("ratelimit", 50, "max DHT queries per minute per IP (0 to disable)")
+	metricsPort := fs.Int("metrics-port", 0, "HTTP port for /metrics endpoint (0 to disable)")
 	fs.Parse(args[1:])
 
 	dhtLogger := setupDHTLogger(*logPath)
@@ -450,6 +451,7 @@ func handleDHT(args []string) error {
 		dht.WithLogger(dhtLogger),
 		dht.WithRoutingTable(*statePath),
 		dht.WithRateLimit(*rateLimit, 1*time.Minute),
+		dht.WithMetricsPort(*metricsPort),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create DHT: %w", err)

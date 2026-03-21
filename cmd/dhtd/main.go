@@ -22,6 +22,7 @@ func main() {
 	statePath := flag.String("state", "dht_state.dat", "path to routing table persistence file")
 	infohashFlag := flag.String("infohash", "", "comma-separated hex info hashes to announce")
 	rateLimit := flag.Int("ratelimit", 50, "max DHT queries per minute per IP (0 to disable)")
+	metricsPort := flag.Int("metrics-port", 0, "HTTP port for /metrics endpoint (0 to disable)")
 	debug := flag.Bool("debug", false, "enable debug logging")
 	flag.Parse()
 
@@ -52,6 +53,7 @@ func main() {
 		dht.WithLogger(logger),
 		dht.WithRoutingTable(*statePath),
 		dht.WithRateLimit(*rateLimit, 1*time.Minute),
+		dht.WithMetricsPort(*metricsPort),
 	)
 	if err != nil {
 		logger.Error("failed to create DHT", "error", err)

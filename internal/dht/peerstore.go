@@ -78,3 +78,14 @@ func (ps *PeerStore) Expire() int {
 	}
 	return expired
 }
+
+// Count returns the total number of stored peer entries across all info hashes.
+func (ps *PeerStore) Count() int {
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	n := 0
+	for _, v := range ps.peers {
+		n += len(v)
+	}
+	return n
+}

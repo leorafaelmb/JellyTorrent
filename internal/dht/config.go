@@ -26,6 +26,7 @@ type Config struct {
 	BEP42            BEP42Mode
 	RateLimit        int           // max queries per window per IP (0 = disabled)
 	RateLimitWin     time.Duration // rate limit window duration
+	MetricsPort      int           // HTTP port for /metrics endpoint (0 = disabled)
 }
 
 func DefaultConfig() Config {
@@ -84,6 +85,12 @@ func WithRoutingTable(path string) Option {
 func WithBEP42(mode BEP42Mode) Option {
 	return func(c *Config) {
 		c.BEP42 = mode
+	}
+}
+
+func WithMetricsPort(port int) Option {
+	return func(c *Config) {
+		c.MetricsPort = port
 	}
 }
 

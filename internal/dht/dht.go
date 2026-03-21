@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"sort"
@@ -15,6 +16,7 @@ import (
 	"github.com/leorafaelmb/JellyTorrent/internal/bencode"
 	"github.com/leorafaelmb/JellyTorrent/internal/dht/hardening"
 	"github.com/leorafaelmb/JellyTorrent/internal/dht/krpc"
+	"github.com/leorafaelmb/JellyTorrent/internal/dht/metrics"
 	"github.com/leorafaelmb/JellyTorrent/internal/dht/nodeid"
 	"github.com/leorafaelmb/JellyTorrent/internal/dht/routing"
 	"github.com/leorafaelmb/JellyTorrent/internal/dht/token"
@@ -39,7 +41,9 @@ type DHT struct {
 	externalIP  netip.Addr              // BEP 42: our external IP as seen by others
 	ipVotes     map[netip.Addr]int    // BEP 42: IP votes from bootstrap responses
 	ipVotesMu   sync.Mutex
-	rateLimiter *hardening.RateLimiter // nil if rate limiting disabled
+	rateLimiter  *hardening.RateLimiter // nil if rate limiting disabled
+	metrics      *metrics.Metrics      // nil if metrics disabled
+	metricsHTTP  *http.Server          // nil if metrics disabled
 }
 
 func New(opts ...Option) (*DHT, error) {
@@ -97,6 +101,31 @@ func New(opts ...Option) (*DHT, error) {
 	d.server = server
 	d.server.Start()
 	d.startMaintenance()
+
+	// Start metrics HTTP server if configured.
+	if config.MetricsPort > 0 {
+		rateLimitedIPs := func() int { return 0 }
+		if d.rateLimiter != nil {
+			rateLimitedIPs = d.rateLimiter.Len
+		}
+		d.metrics = metrics.NewMetrics(
+			d.table.NumNodes,
+			d.peers.Count,
+			rateLimitedIPs,
+		)
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", d.metrics.Handler())
+		d.metricsHTTP = &http.Server{
+			Addr:    fmt.Sprintf(":%d", config.MetricsPort),
+			Handler: mux,
+		}
+		go func() {
+			if err := d.metricsHTTP.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				config.Logger.Warn("metrics HTTP server error", "err", err)
+			}
+		}()
+		config.Logger.Info("metrics endpoint started", "port", config.MetricsPort)
+	}
 
 	config.Logger.Info("DHT node started",
 		"node_id", d.id.String(),
@@ -253,10 +282,14 @@ func (d *DHT) Bootstrap(ctx context.Context) error {
 	// iterative lookup on our own ID to fill nearby buckets
 	d.iterativeFindNode(ctx, d.id)
 
+	bootstrapElapsed := time.Since(start)
 	d.config.Logger.Info("bootstrap complete",
-		"duration_ms", time.Since(start).Milliseconds(),
+		"duration_ms", bootstrapElapsed.Milliseconds(),
 		"table_size", d.table.NumNodes(),
 	)
+	if d.metrics != nil {
+		d.metrics.SetBootstrapDuration(bootstrapElapsed.Seconds())
+	}
 
 	return nil
 }
@@ -467,6 +500,9 @@ func (d *DHT) Close() error {
 		"node_id", d.id.String(),
 		"table_size", d.table.NumNodes(),
 	)
+	if d.metricsHTTP != nil {
+		d.metricsHTTP.Close()
+	}
 	close(d.stop)
 	d.wg.Wait()
 	return d.server.Close()
@@ -621,12 +657,16 @@ func (d *DHT) iterativeFindNode(ctx context.Context, target nodeid.NodeID) []*ro
 		candidates = candidates[:routing.K]
 	}
 
+	elapsed := time.Since(start)
 	d.config.Logger.Info("lookup complete",
 		"target", target.String(),
-		"duration_ms", time.Since(start).Milliseconds(),
+		"duration_ms", elapsed.Milliseconds(),
 		"nodes_found", len(candidates),
 		"rounds", rounds,
 	)
+	if d.metrics != nil {
+		d.metrics.LookupDuration.Observe(elapsed.Seconds())
+	}
 
 	return candidates
 }
@@ -676,6 +716,11 @@ func (d *DHT) sendAnnouncePeer(ctx context.Context, addr netip.AddrPort, infoHas
 // Cancels the transaction if no response arrives in time.
 func (d *DHT) sendQuery(ctx context.Context, msg *krpc.Message, addr netip.AddrPort, method string) *krpc.Message {
 	start := time.Now()
+	if d.metrics != nil {
+		if idx := metrics.MethodIndex(method); idx >= 0 {
+			d.metrics.QueriesOutbound[idx].Inc()
+		}
+	}
 	txnID, ch, err := d.server.Send(msg, addr)
 	if err != nil {
 		d.config.Logger.Debug("query send failed",
@@ -694,6 +739,9 @@ func (d *DHT) sendQuery(ctx context.Context, msg *krpc.Message, addr netip.AddrP
 			"duration_ms", time.Since(start).Milliseconds(),
 			"status", "success",
 		)
+		if d.metrics != nil {
+			d.metrics.ResponseSuccess.Inc()
+		}
 		return resp
 	case <-ctx.Done():
 		d.server.Cancel(txnID)
@@ -703,6 +751,9 @@ func (d *DHT) sendQuery(ctx context.Context, msg *krpc.Message, addr netip.AddrP
 			"duration_ms", time.Since(start).Milliseconds(),
 			"status", "ctx_canceled",
 		)
+		if d.metrics != nil {
+			d.metrics.ResponseCanceled.Inc()
+		}
 		return nil
 	case <-time.After(queryTimeout):
 		d.server.Cancel(txnID)
@@ -712,6 +763,9 @@ func (d *DHT) sendQuery(ctx context.Context, msg *krpc.Message, addr netip.AddrP
 			"duration_ms", time.Since(start).Milliseconds(),
 			"status", "timeout",
 		)
+		if d.metrics != nil {
+			d.metrics.ResponseTimeout.Inc()
+		}
 		return nil
 	}
 }
@@ -724,6 +778,9 @@ func (d *DHT) handleQuery(msg *krpc.Message, addr netip.AddrPort) {
 			"addr", addr.String(),
 			"method", msg.QueryMethod,
 		)
+		if d.metrics != nil {
+			d.metrics.RateLimited.Inc()
+		}
 		return
 	}
 
@@ -740,6 +797,9 @@ func (d *DHT) handleQuery(msg *krpc.Message, addr netip.AddrPort) {
 				"id", senderID.String(),
 				"addr", addr.String(),
 			)
+			if d.metrics != nil {
+				d.metrics.BEP42NonCompliant.Inc()
+			}
 			if d.config.BEP42 == BEP42Enforce {
 				return // drop query from non-compliant node
 			}
@@ -759,6 +819,11 @@ func (d *DHT) handleQuery(msg *krpc.Message, addr netip.AddrPort) {
 		"node_id", senderID.String(),
 		"direction", "inbound",
 	)
+	if d.metrics != nil {
+		if idx := metrics.MethodIndex(msg.QueryMethod); idx >= 0 {
+			d.metrics.QueriesInbound[idx].Inc()
+		}
+	}
 
 	switch msg.QueryMethod {
 	case "ping":
@@ -848,6 +913,9 @@ func (d *DHT) handleAnnouncePeer(msg *krpc.Message, addr netip.AddrPort) {
 			"addr", addr.String(),
 			"info_hash", hex.EncodeToString(infoHash[:]),
 		)
+		if d.metrics != nil {
+			d.metrics.TokenFailure.Inc()
+		}
 		d.server.Reply(&krpc.Message{
 			TransactionID: msg.TransactionID,
 			Type:          "e",
@@ -866,6 +934,10 @@ func (d *DHT) handleAnnouncePeer(msg *krpc.Message, addr netip.AddrPort) {
 	}
 
 	d.peers.Add(infoHash, peerAddr)
+
+	if d.metrics != nil {
+		d.metrics.TokenSuccess.Inc()
+	}
 
 	d.config.Logger.Debug("peer announced",
 		"addr", addr.String(),
