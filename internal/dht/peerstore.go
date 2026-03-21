@@ -57,14 +57,17 @@ func (ps *PeerStore) Get(infoHash [20]byte) []netip.AddrPort {
 
 }
 
-func (ps *PeerStore) Expire() {
+func (ps *PeerStore) Expire() int {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
+	expired := 0
 	for k, v := range ps.peers {
 		kept := v[:0]
 		for _, p := range v {
 			if time.Since(p.Added) < ps.ttl {
 				kept = append(kept, p)
+			} else {
+				expired++
 			}
 		}
 		if len(kept) == 0 {
@@ -73,4 +76,5 @@ func (ps *PeerStore) Expire() {
 			ps.peers[k] = kept
 		}
 	}
+	return expired
 }

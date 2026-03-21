@@ -3,6 +3,7 @@ package dht
 import (
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/netip"
@@ -59,7 +60,7 @@ func New(opts ...Option) (*DHT, error) {
 		}
 	}
 
-	table := routing.NewRoutingTable(id)
+	table := routing.NewRoutingTable(id, config.Logger)
 	for _, n := range savedNodes {
 		table.Insert(n)
 	}
@@ -89,13 +90,19 @@ func New(opts ...Option) (*DHT, error) {
 		return nil, err
 	}
 
-	server, err := krpc.NewServer(addr, d.handleQuery)
+	server, err := krpc.NewServer(addr, d.handleQuery, config.Logger)
 	if err != nil {
 		return nil, err
 	}
 	d.server = server
 	d.server.Start()
 	d.startMaintenance()
+
+	config.Logger.Info("DHT node started",
+		"node_id", d.id.String(),
+		"port", d.server.LocalAddr().Port(),
+		"table_size", d.table.NumNodes(),
+	)
 
 	return d, nil
 }
@@ -113,6 +120,7 @@ func (d *DHT) startMaintenance() {
 			select {
 			case <-ticker.C:
 				d.tokens.Rotate()
+				d.config.Logger.Debug("token rotated")
 			case <-d.stop:
 				return
 			}
@@ -131,7 +139,10 @@ func (d *DHT) startMaintenance() {
 		for {
 			select {
 			case <-ticker.C:
-				d.peers.Expire()
+				expired := d.peers.Expire()
+				if expired > 0 {
+					d.config.Logger.Debug("peer store cleanup", "expired_count", expired)
+				}
 			case <-d.stop:
 				return
 			}
@@ -168,7 +179,13 @@ func (d *DHT) startMaintenance() {
 			for {
 				select {
 				case <-ticker.C:
-					d.rateLimiter.Cleanup()
+					removed := d.rateLimiter.Cleanup()
+					if removed > 0 {
+						d.config.Logger.Debug("rate limiter cleanup",
+							"removed_count", removed,
+							"remaining_count", d.rateLimiter.Len(),
+						)
+					}
 				case <-d.stop:
 					return
 				}
@@ -191,6 +208,11 @@ func (d *DHT) refreshTable() {
 // it collects external IP votes from responses and regenerates the node ID
 // to be compliant before performing the iterative lookup.
 func (d *DHT) Bootstrap(ctx context.Context) error {
+	start := time.Now()
+	d.config.Logger.Info("bootstrap started",
+		"bootstrap_nodes", len(d.config.BootstrapNodes),
+	)
+
 	for _, addr := range d.config.BootstrapNodes {
 		resolved, err := net.ResolveUDPAddr("udp", addr)
 		if err != nil {
@@ -230,11 +252,21 @@ func (d *DHT) Bootstrap(ctx context.Context) error {
 
 	// iterative lookup on our own ID to fill nearby buckets
 	d.iterativeFindNode(ctx, d.id)
+
+	d.config.Logger.Info("bootstrap complete",
+		"duration_ms", time.Since(start).Milliseconds(),
+		"table_size", d.table.NumNodes(),
+	)
+
 	return nil
 }
 
 // GetPeers performs an iterative lookup for peers downloading the given torrent.
 func (d *DHT) GetPeers(ctx context.Context, infoHash [20]byte) ([]netip.AddrPort, error) {
+	start := time.Now()
+	ihHex := hex.EncodeToString(infoHash[:])
+	d.config.Logger.Debug("get_peers started", "info_hash", ihHex)
+
 	target := nodeid.NodeID(infoHash)
 	closest := d.table.FindClosest(target, routing.K)
 	if len(closest) == 0 {
@@ -316,11 +348,19 @@ func (d *DHT) GetPeers(ctx context.Context, infoHash [20]byte) ([]netip.AddrPort
 
 	_ = tokens
 
+	d.config.Logger.Info("get_peers complete",
+		"info_hash", ihHex,
+		"duration_ms", time.Since(start).Milliseconds(),
+		"peers_found", len(allPeers),
+	)
+
 	return allPeers, nil
 }
 
 // Announce tells the DHT that we are downloading/seeding the given torrent.
 func (d *DHT) Announce(ctx context.Context, infoHash [20]byte, port int) error {
+	start := time.Now()
+	ihHex := hex.EncodeToString(infoHash[:])
 	target := nodeid.NodeID(infoHash)
 	closest := d.table.FindClosest(target, routing.K)
 	if len(closest) == 0 {
@@ -411,12 +451,22 @@ func (d *DHT) Announce(ctx context.Context, infoHash [20]byte, port int) error {
 		announced++
 	}
 
+	d.config.Logger.Info("announce complete",
+		"info_hash", ihHex,
+		"duration_ms", time.Since(start).Milliseconds(),
+		"announced_to", announced,
+	)
+
 	return nil
 }
 
 // Close shuts down the DHT: stops maintenance goroutines, waits for them
 // to finish, then closes the UDP server.
 func (d *DHT) Close() error {
+	d.config.Logger.Info("DHT node stopping",
+		"node_id", d.id.String(),
+		"table_size", d.table.NumNodes(),
+	)
 	close(d.stop)
 	d.wg.Wait()
 	return d.server.Close()
@@ -506,6 +556,9 @@ func loadRoutingTable(path string) (*savedState, error) {
 // --- Iterative lookup ---
 
 func (d *DHT) iterativeFindNode(ctx context.Context, target nodeid.NodeID) []*routing.Node {
+	start := time.Now()
+	d.config.Logger.Debug("lookup started", "target", target.String())
+
 	closest := d.table.FindClosest(target, routing.K)
 	if len(closest) == 0 {
 		return nil
@@ -515,7 +568,8 @@ func (d *DHT) iterativeFindNode(ctx context.Context, target nodeid.NodeID) []*ro
 	candidates := make([]*routing.Node, len(closest))
 	copy(candidates, closest)
 
-	for round := 0; round < 10; round++ {
+	var rounds int
+	for rounds = 0; rounds < 10; rounds++ {
 		sort.Slice(candidates, func(i, j int) bool {
 			di := target.Distance(candidates[i].ID)
 			dj := target.Distance(candidates[j].ID)
@@ -566,6 +620,14 @@ func (d *DHT) iterativeFindNode(ctx context.Context, target nodeid.NodeID) []*ro
 	if len(candidates) > routing.K {
 		candidates = candidates[:routing.K]
 	}
+
+	d.config.Logger.Info("lookup complete",
+		"target", target.String(),
+		"duration_ms", time.Since(start).Milliseconds(),
+		"nodes_found", len(candidates),
+		"rounds", rounds,
+	)
+
 	return candidates
 }
 
@@ -580,7 +642,7 @@ func (d *DHT) sendFindNode(ctx context.Context, addr netip.AddrPort, target node
 			"target": string(target[:]),
 		},
 	}
-	return d.sendQuery(ctx, msg, addr)
+	return d.sendQuery(ctx, msg, addr, "find_node")
 }
 
 func (d *DHT) sendGetPeers(ctx context.Context, addr netip.AddrPort, infoHash [20]byte) *krpc.Message {
@@ -592,7 +654,7 @@ func (d *DHT) sendGetPeers(ctx context.Context, addr netip.AddrPort, infoHash [2
 			"info_hash": string(infoHash[:]),
 		},
 	}
-	return d.sendQuery(ctx, msg, addr)
+	return d.sendQuery(ctx, msg, addr, "get_peers")
 }
 
 func (d *DHT) sendAnnouncePeer(ctx context.Context, addr netip.AddrPort, infoHash [20]byte, port int, tok [20]byte) *krpc.Message {
@@ -607,25 +669,49 @@ func (d *DHT) sendAnnouncePeer(ctx context.Context, addr netip.AddrPort, infoHas
 			"implied_port": 0,
 		},
 	}
-	return d.sendQuery(ctx, msg, addr)
+	return d.sendQuery(ctx, msg, addr, "announce_peer")
 }
 
 // sendQuery sends a query and waits for the response with a timeout.
 // Cancels the transaction if no response arrives in time.
-func (d *DHT) sendQuery(ctx context.Context, msg *krpc.Message, addr netip.AddrPort) *krpc.Message {
+func (d *DHT) sendQuery(ctx context.Context, msg *krpc.Message, addr netip.AddrPort, method string) *krpc.Message {
+	start := time.Now()
 	txnID, ch, err := d.server.Send(msg, addr)
 	if err != nil {
+		d.config.Logger.Debug("query send failed",
+			"method", method,
+			"addr", addr.String(),
+			"err", err,
+		)
 		return nil
 	}
 
 	select {
 	case resp := <-ch:
+		d.config.Logger.Debug("query response",
+			"method", method,
+			"addr", addr.String(),
+			"duration_ms", time.Since(start).Milliseconds(),
+			"status", "success",
+		)
 		return resp
 	case <-ctx.Done():
 		d.server.Cancel(txnID)
+		d.config.Logger.Debug("query response",
+			"method", method,
+			"addr", addr.String(),
+			"duration_ms", time.Since(start).Milliseconds(),
+			"status", "ctx_canceled",
+		)
 		return nil
 	case <-time.After(queryTimeout):
 		d.server.Cancel(txnID)
+		d.config.Logger.Debug("query response",
+			"method", method,
+			"addr", addr.String(),
+			"duration_ms", time.Since(start).Milliseconds(),
+			"status", "timeout",
+		)
 		return nil
 	}
 }
@@ -666,6 +752,13 @@ func (d *DHT) handleQuery(msg *krpc.Message, addr netip.AddrPort) {
 		LastSeen:  time.Now(),
 		Compliant: compliant,
 	})
+
+	d.config.Logger.Debug("query received",
+		"method", msg.QueryMethod,
+		"addr", addr.String(),
+		"node_id", senderID.String(),
+		"direction", "inbound",
+	)
 
 	switch msg.QueryMethod {
 	case "ping":
@@ -751,6 +844,10 @@ func (d *DHT) handleAnnouncePeer(msg *krpc.Message, addr netip.AddrPort) {
 	}
 
 	if !d.tokens.Validate(addr.Addr(), tok) {
+		d.config.Logger.Debug("token validation failed",
+			"addr", addr.String(),
+			"info_hash", hex.EncodeToString(infoHash[:]),
+		)
 		d.server.Reply(&krpc.Message{
 			TransactionID: msg.TransactionID,
 			Type:          "e",
@@ -769,6 +866,12 @@ func (d *DHT) handleAnnouncePeer(msg *krpc.Message, addr netip.AddrPort) {
 	}
 
 	d.peers.Add(infoHash, peerAddr)
+
+	d.config.Logger.Debug("peer announced",
+		"addr", addr.String(),
+		"info_hash", hex.EncodeToString(infoHash[:]),
+		"peer_addr", peerAddr.String(),
+	)
 
 	resp := &krpc.Message{
 		TransactionID: msg.TransactionID,
@@ -896,7 +999,7 @@ func (d *DHT) regenerateCompliantID(ip netip.Addr) {
 
 	d.id = newID
 	d.externalIP = ip
-	d.table = routing.NewRoutingTable(newID)
+	d.table = routing.NewRoutingTable(newID, d.config.Logger)
 
 	// Re-insert existing nodes with BEP 42 validation.
 	for _, n := range nodes {

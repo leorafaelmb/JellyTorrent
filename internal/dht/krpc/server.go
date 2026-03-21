@@ -10,9 +10,13 @@ type Server struct {
 	conn    net.PacketConn
 	txns    *TransactionManager
 	handler func(*Message, netip.AddrPort)
+	logger  *slog.Logger
 }
 
-func NewServer(addr netip.AddrPort, handler func(*Message, netip.AddrPort)) (*Server, error) {
+func NewServer(addr netip.AddrPort, handler func(*Message, netip.AddrPort), logger *slog.Logger) (*Server, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	txns := NewTransactionManager()
 
 	conn, err := net.ListenPacket("udp", addr.String())
@@ -24,6 +28,7 @@ func NewServer(addr netip.AddrPort, handler func(*Message, netip.AddrPort)) (*Se
 		conn:    conn,
 		txns:    txns,
 		handler: handler,
+		logger:  logger,
 	}, nil
 }
 
@@ -41,7 +46,7 @@ func (s *Server) readLoop() {
 
 		msg, err := Unmarshal(buf[:n])
 		if err != nil {
-			slog.Debug("failed to unmarshal packet", "err", err, "addr", addr)
+			s.logger.Debug("malformed packet", "err", err, "addr", addr)
 			continue
 		}
 

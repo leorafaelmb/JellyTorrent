@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"log/slog"
 	"sort"
 	"sync"
 
@@ -11,9 +12,13 @@ type RoutingTable struct {
 	self    nodeid.NodeID
 	buckets [160]*Bucket
 	mu      sync.RWMutex
+	logger  *slog.Logger
 }
 
-func NewRoutingTable(self nodeid.NodeID) *RoutingTable {
+func NewRoutingTable(self nodeid.NodeID, logger *slog.Logger) *RoutingTable {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	buckets := [160]*Bucket{}
 
 	for i := range buckets {
@@ -24,6 +29,7 @@ func NewRoutingTable(self nodeid.NodeID) *RoutingTable {
 		self:    self,
 		buckets: buckets,
 		mu:      sync.RWMutex{},
+		logger:  logger,
 	}
 
 }
@@ -34,9 +40,41 @@ func (rt *RoutingTable) Insert(node *Node) (*Node, bool) {
 		return nil, false // don't insert self
 	}
 	rt.mu.Lock()
-	node, success := rt.buckets[i].Insert(node)
+	wasFull := rt.buckets[i].Len() == K
+	result, success := rt.buckets[i].Insert(node)
+	tableSize := rt.countLocked()
 	rt.mu.Unlock()
-	return node, success
+
+	if success && wasFull && result == nil {
+		// Bucket was full but insertion succeeded — either a refresh (existing node
+		// moved to tail) or a BEP 42 compliant eviction. We can't distinguish these
+		// without more info from the bucket, but compliant eviction is the interesting
+		// case and only happens when node.Compliant is true.
+		if node.Compliant {
+			rt.logger.Debug("routing table node evicted",
+				"new_id", node.ID.String(),
+				"new_addr", node.Addr.String(),
+				"bucket", i,
+				"table_size", tableSize,
+			)
+		}
+	} else if success && !wasFull {
+		rt.logger.Debug("routing table node added",
+			"node_id", node.ID.String(),
+			"addr", node.Addr.String(),
+			"bucket", i,
+			"table_size", tableSize,
+		)
+	} else if !success {
+		rt.logger.Debug("routing table insert rejected",
+			"node_id", node.ID.String(),
+			"addr", node.Addr.String(),
+			"bucket", i,
+			"table_size", tableSize,
+		)
+	}
+
+	return result, success
 }
 
 func (rt *RoutingTable) Remove(node *Node) bool {
@@ -47,6 +85,12 @@ func (rt *RoutingTable) Remove(node *Node) bool {
 	rt.mu.Lock()
 	ok := rt.buckets[i].Remove(node.ID)
 	rt.mu.Unlock()
+	if ok {
+		rt.logger.Debug("routing table node removed",
+			"node_id", node.ID.String(),
+			"bucket", i,
+		)
+	}
 	return ok
 }
 
@@ -103,6 +147,15 @@ func (rt *RoutingTable) Snapshot() []*Node {
 // Self returns the node ID of the local node.
 func (rt *RoutingTable) Self() nodeid.NodeID {
 	return rt.self
+}
+
+// countLocked returns the total number of nodes. Must be called with rt.mu held.
+func (rt *RoutingTable) countLocked() int {
+	n := 0
+	for _, b := range rt.buckets {
+		n += b.Len()
+	}
+	return n
 }
 
 func (rt *RoutingTable) NumNodes() int {

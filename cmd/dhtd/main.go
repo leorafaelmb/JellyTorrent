@@ -22,9 +22,10 @@ func main() {
 	statePath := flag.String("state", "dht_state.dat", "path to routing table persistence file")
 	infohashFlag := flag.String("infohash", "", "comma-separated hex info hashes to announce")
 	rateLimit := flag.Int("ratelimit", 50, "max DHT queries per minute per IP (0 to disable)")
+	debug := flag.Bool("debug", false, "enable debug logging")
 	flag.Parse()
 
-	logger := setupLogger(*logPath)
+	logger := setupLogger(*logPath, *debug)
 
 	// Ensure state directory exists.
 	if dir := filepath.Dir(*statePath); dir != "." {
@@ -125,9 +126,14 @@ func main() {
 	logger.Info("shutdown complete")
 }
 
-func setupLogger(logPath string) *slog.Logger {
+func setupLogger(logPath string, debug bool) *slog.Logger {
+	opts := &slog.HandlerOptions{}
+	if debug {
+		opts.Level = slog.LevelDebug
+	}
+
 	if logPath == "" {
-		return slog.New(slog.NewJSONHandler(os.Stderr, nil))
+		return slog.New(slog.NewJSONHandler(os.Stderr, opts))
 	}
 
 	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
@@ -135,7 +141,7 @@ func setupLogger(logPath string) *slog.Logger {
 		fmt.Fprintf(os.Stderr, "failed to open log file: %v\n", err)
 		os.Exit(1)
 	}
-	return slog.New(slog.NewJSONHandler(f, nil))
+	return slog.New(slog.NewJSONHandler(f, opts))
 }
 
 func parseInfoHashes(s string) ([][20]byte, error) {

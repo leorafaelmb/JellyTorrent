@@ -92,22 +92,26 @@ func (rl *RateLimiter) Allow(ip netip.Addr) bool {
 }
 
 // Cleanup removes entries for IPs that have been inactive for at least
-// two full windows. Safe to call from a separate goroutine.
-func (rl *RateLimiter) Cleanup() {
+// two full windows. Returns the number of entries removed.
+// Safe to call from a separate goroutine.
+func (rl *RateLimiter) Cleanup() int {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	rl.cleanupLocked(time.Now())
+	return rl.cleanupLocked(time.Now())
 }
 
 // cleanupLocked sweeps the map and deletes fully expired entries.
-// Must be called with rl.mu held.
-func (rl *RateLimiter) cleanupLocked(now time.Time) {
+// Must be called with rl.mu held. Returns the number of entries removed.
+func (rl *RateLimiter) cleanupLocked(now time.Time) int {
+	removed := 0
 	cutoff := 2 * rl.window
 	for ip, w := range rl.windows {
 		if now.Sub(w.currStart) >= cutoff {
 			delete(rl.windows, ip)
+			removed++
 		}
 	}
+	return removed
 }
 
 // Len returns the number of currently tracked IPs.

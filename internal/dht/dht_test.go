@@ -283,7 +283,7 @@ func TestBEP42CompliantNodeEvictsNonCompliant(t *testing.T) {
 	}
 
 	// Create a routing table and fill a bucket with non-compliant nodes.
-	rt := routing.NewRoutingTable(compliantID)
+	rt := routing.NewRoutingTable(compliantID, nil)
 
 	// Find a bucket that we can fill. Insert nodes with non-compliant IDs
 	// that land in the same bucket.

@@ -18,7 +18,7 @@ func makeTableNode(id nodeid.NodeID) *Node {
 
 func TestTableInsertAndNumNodes(t *testing.T) {
 	self := nodeid.NodeID{}
-	rt := NewRoutingTable(self)
+	rt := NewRoutingTable(self, nil)
 
 	n := makeTableNode(nodeid.NodeID{0x80}) // prefix len 0 from self
 	_, ok := rt.Insert(n)
@@ -32,7 +32,7 @@ func TestTableInsertAndNumNodes(t *testing.T) {
 
 func TestTableInsertCorrectBucket(t *testing.T) {
 	self := nodeid.NodeID{}
-	rt := NewRoutingTable(self)
+	rt := NewRoutingTable(self, nil)
 
 	// Nodes with different prefix lengths should go to different buckets
 	n1 := makeTableNode(nodeid.NodeID{0x80}) // prefix len 0
@@ -49,7 +49,7 @@ func TestTableInsertCorrectBucket(t *testing.T) {
 
 func TestTableFindClosestSorted(t *testing.T) {
 	self := nodeid.NodeID{}
-	rt := NewRoutingTable(self)
+	rt := NewRoutingTable(self, nil)
 
 	ids := []nodeid.NodeID{
 		{0x80},
@@ -80,7 +80,7 @@ func TestTableFindClosestSorted(t *testing.T) {
 
 func TestTableFindClosestReturnsCorrectNodes(t *testing.T) {
 	self := nodeid.NodeID{}
-	rt := NewRoutingTable(self)
+	rt := NewRoutingTable(self, nil)
 
 	// Insert nodes at various distances from target 0x10
 	ids := []nodeid.NodeID{
@@ -111,7 +111,7 @@ func TestTableFindClosestReturnsCorrectNodes(t *testing.T) {
 
 func TestTableFindClosestFewerThanCount(t *testing.T) {
 	self := nodeid.NodeID{}
-	rt := NewRoutingTable(self)
+	rt := NewRoutingTable(self, nil)
 
 	rt.Insert(makeTableNode(nodeid.NodeID{0x80}))
 	rt.Insert(makeTableNode(nodeid.NodeID{0x40}))
@@ -124,7 +124,7 @@ func TestTableFindClosestFewerThanCount(t *testing.T) {
 
 func TestTableFindClosestEmpty(t *testing.T) {
 	self := nodeid.NodeID{}
-	rt := NewRoutingTable(self)
+	rt := NewRoutingTable(self, nil)
 
 	closest := rt.FindClosest(nodeid.NodeID{0x80}, 5)
 	if len(closest) != 0 {
@@ -134,7 +134,7 @@ func TestTableFindClosestEmpty(t *testing.T) {
 
 func TestTablePrefixLen160Boundary(t *testing.T) {
 	self := nodeid.NodeID{}
-	rt := NewRoutingTable(self)
+	rt := NewRoutingTable(self, nil)
 
 	// Inserting a node with the same ID as self (PrefixLen=160) should
 	// be silently rejected, not panic.
@@ -150,7 +150,7 @@ func TestTablePrefixLen160Boundary(t *testing.T) {
 
 func TestTableSnapshot(t *testing.T) {
 	self := nodeid.NodeID{}
-	rt := NewRoutingTable(self)
+	rt := NewRoutingTable(self, nil)
 
 	ids := []nodeid.NodeID{{0x80}, {0x40}, {0x20}, {0x10}, {0x08}}
 	for _, id := range ids {
@@ -175,7 +175,7 @@ func TestTableSnapshot(t *testing.T) {
 
 func TestTableSnapshotEmpty(t *testing.T) {
 	self := nodeid.NodeID{}
-	rt := NewRoutingTable(self)
+	rt := NewRoutingTable(self, nil)
 
 	snap := rt.Snapshot()
 	if len(snap) != 0 {
@@ -185,7 +185,7 @@ func TestTableSnapshotEmpty(t *testing.T) {
 
 func TestTableSelf(t *testing.T) {
 	self := nodeid.NodeID{0xAB, 0xCD}
-	rt := NewRoutingTable(self)
+	rt := NewRoutingTable(self, nil)
 
 	if rt.Self() != self {
 		t.Errorf("Self() returned %x, want %x", rt.Self(), self)
@@ -194,7 +194,7 @@ func TestTableSelf(t *testing.T) {
 
 func TestTableRemove(t *testing.T) {
 	self := nodeid.NodeID{}
-	rt := NewRoutingTable(self)
+	rt := NewRoutingTable(self, nil)
 	n := makeTableNode(nodeid.NodeID{0x80})
 	rt.Insert(n)
 
