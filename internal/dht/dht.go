@@ -27,6 +27,7 @@ const (
 	tokenRotateInterval = 5 * time.Minute
 	peerExpireInterval  = 5 * time.Minute
 	refreshInterval     = 15 * time.Minute
+	saveInterval        = 5 * time.Minute
 )
 
 type DHT struct {
@@ -197,6 +198,29 @@ func (d *DHT) startMaintenance() {
 			}
 		}
 	}()
+
+	// Periodic routing table save: every 5 minutes, persist the routing
+	// table to disk so progress is not lost on crashes or panics.
+	if d.config.RoutingTablePath != "" {
+		d.wg.Add(1)
+		go func() {
+			defer d.wg.Done()
+			ticker := time.NewTicker(saveInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					if err := d.Save(d.config.RoutingTablePath); err != nil {
+						d.config.Logger.Warn("periodic routing table save failed", "err", err)
+					} else {
+						d.config.Logger.Debug("routing table saved", "path", d.config.RoutingTablePath, "table_size", d.table.NumNodes())
+					}
+				case <-d.stop:
+					return
+				}
+			}
+		}()
+	}
 
 	// Rate limiter cleanup: periodically sweep expired per-IP counters.
 	if d.rateLimiter != nil {
