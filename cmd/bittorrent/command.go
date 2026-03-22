@@ -423,6 +423,7 @@ func handleDHT(args []string) error {
 	infohashFlag := fs.String("infohash", "", "comma-separated hex info hashes to announce")
 	rateLimit := fs.Int("ratelimit", 50, "max DHT queries per minute per IP (0 to disable)")
 	metricsPort := fs.Int("metrics-port", 0, "HTTP port for /metrics endpoint (0 to disable)")
+	bep42 := fs.String("bep42", "off", "BEP 42 node ID restriction mode: off, log, enforce")
 	fs.Parse(args[1:])
 
 	dhtLogger := setupDHTLogger(*logPath)
@@ -446,12 +447,21 @@ func handleDHT(args []string) error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
+	bep42Mode := dht.BEP42Off
+	switch *bep42 {
+	case "log":
+		bep42Mode = dht.BEP42Log
+	case "enforce":
+		bep42Mode = dht.BEP42Enforce
+	}
+
 	d, err := dht.New(
 		dht.WithPort(*port),
 		dht.WithLogger(dhtLogger),
 		dht.WithRoutingTable(*statePath),
 		dht.WithRateLimit(*rateLimit, 1*time.Minute),
 		dht.WithMetricsPort(*metricsPort),
+		dht.WithBEP42(bep42Mode),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create DHT: %w", err)
