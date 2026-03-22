@@ -749,7 +749,7 @@ func (d *DHT) sendQuery(ctx context.Context, msg *krpc.Message, addr netip.AddrP
 	if err != nil {
 		d.config.Logger.Debug("query send failed",
 			"method", method,
-			"addr", addr.String(),
+			"addr", formatAddr(addr),
 			"err", err,
 		)
 		return nil
@@ -759,7 +759,7 @@ func (d *DHT) sendQuery(ctx context.Context, msg *krpc.Message, addr netip.AddrP
 	case resp := <-ch:
 		d.config.Logger.Debug("query response",
 			"method", method,
-			"addr", addr.String(),
+			"addr", formatAddr(addr),
 			"duration_ms", time.Since(start).Milliseconds(),
 			"status", "success",
 		)
@@ -771,7 +771,7 @@ func (d *DHT) sendQuery(ctx context.Context, msg *krpc.Message, addr netip.AddrP
 		d.server.Cancel(txnID)
 		d.config.Logger.Debug("query response",
 			"method", method,
-			"addr", addr.String(),
+			"addr", formatAddr(addr),
 			"duration_ms", time.Since(start).Milliseconds(),
 			"status", "ctx_canceled",
 		)
@@ -783,7 +783,7 @@ func (d *DHT) sendQuery(ctx context.Context, msg *krpc.Message, addr netip.AddrP
 		d.server.Cancel(txnID)
 		d.config.Logger.Debug("query response",
 			"method", method,
-			"addr", addr.String(),
+			"addr", formatAddr(addr),
 			"duration_ms", time.Since(start).Milliseconds(),
 			"status", "timeout",
 		)
@@ -799,7 +799,7 @@ func (d *DHT) sendQuery(ctx context.Context, msg *krpc.Message, addr netip.AddrP
 func (d *DHT) handleQuery(msg *krpc.Message, addr netip.AddrPort) {
 	if d.rateLimiter != nil && !d.rateLimiter.Allow(addr.Addr()) {
 		d.config.Logger.Debug("rate limited query",
-			"addr", addr.String(),
+			"addr", formatAddr(addr),
 			"method", msg.QueryMethod,
 		)
 		if d.metrics != nil {
@@ -819,7 +819,7 @@ func (d *DHT) handleQuery(msg *krpc.Message, addr netip.AddrPort) {
 		if !compliant {
 			d.config.Logger.Debug("BEP 42 non-compliant node",
 				"id", senderID.String(),
-				"addr", addr.String(),
+				"addr", formatAddr(addr),
 			)
 			if d.metrics != nil {
 				d.metrics.BEP42NonCompliant.Inc()
@@ -839,7 +839,7 @@ func (d *DHT) handleQuery(msg *krpc.Message, addr netip.AddrPort) {
 
 	d.config.Logger.Debug("query received",
 		"method", msg.QueryMethod,
-		"addr", addr.String(),
+		"addr", formatAddr(addr),
 		"node_id", senderID.String(),
 		"direction", "inbound",
 	)
@@ -880,7 +880,7 @@ func (d *DHT) handleFindNode(msg *krpc.Message, addr netip.AddrPort) {
 	}
 
 	d.config.Logger.Debug("find_node target",
-		"addr", addr.String(),
+		"addr", formatAddr(addr),
 		"target", target.String(),
 	)
 
@@ -905,7 +905,7 @@ func (d *DHT) handleGetPeers(msg *krpc.Message, addr netip.AddrPort) {
 	}
 
 	d.config.Logger.Debug("get_peers info_hash",
-		"addr", addr.String(),
+		"addr", formatAddr(addr),
 		"info_hash", hex.EncodeToString(infoHash[:]),
 	)
 
@@ -944,7 +944,7 @@ func (d *DHT) handleAnnouncePeer(msg *krpc.Message, addr netip.AddrPort) {
 
 	if !d.tokens.Validate(addr.Addr(), tok) {
 		d.config.Logger.Debug("token validation failed",
-			"addr", addr.String(),
+			"addr", formatAddr(addr),
 			"info_hash", hex.EncodeToString(infoHash[:]),
 		)
 		if d.metrics != nil {
@@ -974,7 +974,7 @@ func (d *DHT) handleAnnouncePeer(msg *krpc.Message, addr netip.AddrPort) {
 	}
 
 	d.config.Logger.Debug("peer announced",
-		"addr", addr.String(),
+		"addr", formatAddr(addr),
 		"info_hash", hex.EncodeToString(infoHash[:]),
 		"peer_addr", peerAddr.String(),
 	)
@@ -1121,6 +1121,12 @@ func (d *DHT) regenerateCompliantID(ip netip.Addr) {
 		"external_ip", ip.String(),
 		"reinserted_nodes", len(nodes),
 	)
+}
+
+// formatAddr returns a clean address string, unmapping IPv4-mapped IPv6
+// addresses (e.g., "::ffff:1.2.3.4:6881" → "1.2.3.4:6881").
+func formatAddr(addr netip.AddrPort) string {
+	return netip.AddrPortFrom(addr.Addr().Unmap(), addr.Port()).String()
 }
 
 // --- Compact encoding/decoding ---

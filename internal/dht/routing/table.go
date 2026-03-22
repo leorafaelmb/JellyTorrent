@@ -2,11 +2,16 @@ package routing
 
 import (
 	"log/slog"
+	"net/netip"
 	"sort"
 	"sync"
 
 	"github.com/leorafaelmb/JellyTorrent/internal/dht/nodeid"
 )
+
+func formatAddr(addr netip.AddrPort) string {
+	return netip.AddrPortFrom(addr.Addr().Unmap(), addr.Port()).String()
+}
 
 type RoutingTable struct {
 	self    nodeid.NodeID
@@ -53,7 +58,7 @@ func (rt *RoutingTable) Insert(node *Node) (*Node, bool) {
 		if node.Compliant {
 			rt.logger.Debug("routing table node evicted",
 				"new_id", node.ID.String(),
-				"new_addr", node.Addr.String(),
+				"new_addr", formatAddr(node.Addr),
 				"bucket", i,
 				"table_size", tableSize,
 			)
@@ -61,14 +66,14 @@ func (rt *RoutingTable) Insert(node *Node) (*Node, bool) {
 	} else if success && !wasFull {
 		rt.logger.Debug("routing table node added",
 			"node_id", node.ID.String(),
-			"addr", node.Addr.String(),
+			"addr", formatAddr(node.Addr),
 			"bucket", i,
 			"table_size", tableSize,
 		)
 	} else if !success {
 		rt.logger.Debug("routing table insert rejected",
 			"node_id", node.ID.String(),
-			"addr", node.Addr.String(),
+			"addr", formatAddr(node.Addr),
 			"bucket", i,
 			"table_size", tableSize,
 		)
