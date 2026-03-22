@@ -18,6 +18,12 @@ func Decode(bencoded []byte) (interface{}, error) {
 // second returns the ending delimiter (e) of the bencoded structure that has been decoded;
 // third returns any error that came up during decoding.
 func DecodeAt(bencoded []byte, index int) (interface{}, int, error) {
+	if index >= len(bencoded) {
+		return nil, index, &DecodeError{
+			Position: index,
+			Reason:   "unexpected end of data",
+		}
+	}
 	identifier := rune(bencoded[index])
 	if unicode.IsDigit(identifier) {
 		decodedString, i, err := decodeString(bencoded, index)
@@ -48,12 +54,19 @@ func DecodeAt(bencoded []byte, index int) (interface{}, int, error) {
 // decodeString decodes a bencoded string of format: <length>:<contents>
 // Returns the decoded bytes (not converted to string), next index, and any error.
 func decodeString(bencoded []byte, index int) ([]byte, int, error) {
-	var firstColonIndex int
+	firstColonIndex := -1
 
 	for i := index; i < len(bencoded); i++ {
 		if bencoded[i] == ':' {
 			firstColonIndex = i
 			break
+		}
+	}
+	if firstColonIndex == -1 {
+		return nil, index, &DecodeError{
+			Position: index,
+			Reason:   "string missing colon separator",
+			Context:  string(bencoded[index:min(index+20, len(bencoded))]),
 		}
 	}
 	lengthStr := bencoded[index:firstColonIndex]
@@ -67,6 +80,13 @@ func decodeString(bencoded []byte, index int) ([]byte, int, error) {
 		}
 	}
 	endIndex := firstColonIndex + 1 + length
+	if endIndex > len(bencoded) {
+		return nil, index, &DecodeError{
+			Position: index,
+			Reason:   fmt.Sprintf("string length %d exceeds available data", length),
+			Context:  string(bencoded[index:min(index+20, len(bencoded))]),
+		}
+	}
 
 	decodedString := bencoded[firstColonIndex+1 : endIndex]
 
@@ -77,7 +97,14 @@ func decodeString(bencoded []byte, index int) ([]byte, int, error) {
 // Example: "i42e" returns 42
 func decodeInt(bencoded []byte, index int) (int, int, error) {
 	i := index
-	for ; bencoded[i] != 'e'; i++ {
+	for ; i < len(bencoded) && bencoded[i] != 'e'; i++ {
+	}
+	if i >= len(bencoded) {
+		return 0, index, &DecodeError{
+			Position: index,
+			Reason:   "integer missing terminator 'e'",
+			Context:  string(bencoded[index:min(index+20, len(bencoded))]),
+		}
 	}
 
 	numStr := string(bencoded[index+1 : i])
@@ -118,6 +145,13 @@ func decodeList(bencoded []byte, index int) ([]interface{}, int, error) {
 	decodedList := make([]interface{}, 0)
 	i := index + 1
 	for {
+		if i >= len(bencoded) {
+			return nil, index, &DecodeError{
+				Position: index,
+				Reason:   "list missing terminator 'e'",
+				Context:  string(bencoded[index:min(index+20, len(bencoded))]),
+			}
+		}
 		var val interface{}
 		var err error
 
@@ -149,6 +183,13 @@ func decodeDict(bencoded []byte, index int) (map[string]interface{}, int, error)
 	decodedDict := make(map[string]interface{})
 	i := index + 1
 	for {
+		if i >= len(bencoded) {
+			return nil, index, &DecodeError{
+				Position: index,
+				Reason:   "dictionary missing terminator 'e'",
+				Context:  string(bencoded[index:min(index+20, len(bencoded))]),
+			}
+		}
 		var (
 			key []byte
 			val interface{}
