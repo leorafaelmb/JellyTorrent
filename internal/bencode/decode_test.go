@@ -1,7 +1,9 @@
 package bencode
 
 import (
+	"bytes"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -199,5 +201,68 @@ func TestDecodeInvalidIdentifier(t *testing.T) {
 	_, err := Decode([]byte("x"))
 	if err == nil {
 		t.Fatal("expected error for invalid identifier")
+	}
+}
+
+func TestDecodeMalformedInput(t *testing.T) {
+	// Build deeply nested lists: lll...lll eee...eee
+	// Need maxDecodeDepth+2 levels because the innermost empty list
+	// doesn't recurse, so depth tops out at N-1 for N nested lists.
+	nestLists := maxDecodeDepth + 2
+	nestedLists := make([]byte, 0, nestLists*2)
+	for i := 0; i < nestLists; i++ {
+		nestedLists = append(nestedLists, 'l')
+	}
+	for i := 0; i < nestLists; i++ {
+		nestedLists = append(nestedLists, 'e')
+	}
+
+	// Build deeply nested dicts: d1:kd1:k...d1:k i1e eee
+	// Each dict value recurse increments depth, so maxDecodeDepth+1 levels suffice.
+	nestDicts := maxDecodeDepth + 1
+	var nestedDicts bytes.Buffer
+	for i := 0; i < nestDicts; i++ {
+		nestedDicts.WriteString("d1:k")
+	}
+	nestedDicts.WriteString("i1e") // innermost value
+	for i := 0; i < nestDicts; i++ {
+		nestedDicts.WriteByte('e')
+	}
+
+	tests := []struct {
+		name           string
+		input          []byte
+		reasonContains string
+	}{
+		{"overflow string length", []byte("9223372036854775807:x"), "exceeds available data"},
+		{"large string length", []byte("99999:x"), "exceeds available data"},
+		{"missing colon", []byte("5hello"), "missing colon separator"},
+		{"empty integer", []byte("ie"), "empty integer"},
+		{"unterminated integer", []byte("i42"), "missing terminator"},
+		{"unterminated list", []byte("l5:hello"), "missing terminator"},
+		{"unterminated dict", []byte("d3:foo3:bar"), "missing terminator"},
+		{"empty input", []byte(""), "unexpected end of data"},
+		{"truncated string", []byte("5:hi"), "exceeds available data"},
+		{"invalid identifier", []byte("x"), "invalid identifier"},
+		{"dict non-string key", []byte("di1e3:fooe"), "invalid syntax"},
+		{"dict negative-length key", []byte("d-1:x3:fooe"), "negative string length"},
+		{"deeply nested lists", nestedLists, "nesting depth exceeds"},
+		{"deeply nested dicts", nestedDicts.Bytes(), "nesting depth exceeds"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Decode(tt.input)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			decErr, ok := err.(*DecodeError)
+			if !ok {
+				t.Fatalf("expected *DecodeError, got %T: %v", err, err)
+			}
+			if !strings.Contains(decErr.Reason, tt.reasonContains) {
+				t.Errorf("reason %q does not contain %q", decErr.Reason, tt.reasonContains)
+			}
+		})
 	}
 }

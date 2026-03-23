@@ -997,7 +997,8 @@ func (d *DHT) handleAnnouncePeer(msg *krpc.Message, addr netip.AddrPort) {
 	}
 
 	peerAddr := addr
-	if impliedPort, ok := msg.Args["implied_port"]; !ok || impliedPort != 1 {
+	impliedPort, _ := msg.Args["implied_port"].(int)
+	if impliedPort != 1 {
 		port, ok := msg.Args["port"].(int)
 		if !ok {
 			return
