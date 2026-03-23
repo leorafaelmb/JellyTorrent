@@ -5,6 +5,7 @@ import (
 	"net/netip"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/leorafaelmb/JellyTorrent/internal/dht/nodeid"
 )
@@ -161,6 +162,70 @@ func (rt *RoutingTable) countLocked() int {
 		n += b.Len()
 	}
 	return n
+}
+
+// RecordFailure increments the failure count for a node. If the node
+// reaches MaxFailures consecutive failures, it is evicted. Returns true
+// if the node was evicted.
+func (rt *RoutingTable) RecordFailure(id nodeid.NodeID) bool {
+	i := rt.self.PrefixLen(id)
+	if i >= 160 {
+		return false
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	for _, n := range rt.buckets[i].Nodes() {
+		if n.ID == id {
+			n.FailCount++
+			if n.FailCount >= MaxFailures {
+				rt.buckets[i].Remove(id)
+				rt.logger.Debug("stale node evicted",
+					"node_id", id.String(),
+					"addr", formatAddr(n.Addr),
+					"bucket", i,
+					"fail_count", n.FailCount,
+					"table_size", rt.countLocked(),
+				)
+				return true
+			}
+			return false
+		}
+	}
+	return false
+}
+
+// RecordSuccess resets the failure count for a node and updates its
+// LastSeen timestamp.
+func (rt *RoutingTable) RecordSuccess(id nodeid.NodeID) {
+	i := rt.self.PrefixLen(id)
+	if i >= 160 {
+		return
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	for _, n := range rt.buckets[i].Nodes() {
+		if n.ID == id {
+			n.FailCount = 0
+			n.LastSeen = time.Now()
+			return
+		}
+	}
+}
+
+// Stale returns all nodes whose LastSeen is older than the given threshold.
+func (rt *RoutingTable) Stale(threshold time.Duration) []*Node {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	var stale []*Node
+	cutoff := time.Now().Add(-threshold)
+	for _, b := range rt.buckets {
+		for _, n := range b.Nodes() {
+			if n.LastSeen.Before(cutoff) {
+				stale = append(stale, n)
+			}
+		}
+	}
+	return stale
 }
 
 func (rt *RoutingTable) NumNodes() int {

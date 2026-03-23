@@ -248,12 +248,33 @@ func (d *DHT) startMaintenance() {
 }
 
 // refreshTable performs a find_node lookup on a random target to keep
-// the routing table populated.
+// the routing table populated, then sweeps stale nodes.
 func (d *DHT) refreshTable() {
 	target := nodeid.New() // random target
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	d.iterativeFindNode(ctx, target)
+	d.sweepStaleNodes()
+}
+
+// sweepStaleNodes pings all nodes that haven't responded recently and
+// records failures for unresponsive ones, triggering eviction at MaxFailures.
+func (d *DHT) sweepStaleNodes() {
+	stale := d.table.Stale(refreshInterval)
+	if len(stale) == 0 {
+		return
+	}
+	d.config.Logger.Debug("stale node sweep started", "stale_count", len(stale))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for _, n := range stale {
+		resp := d.sendPing(ctx, n.Addr)
+		if resp == nil {
+			d.table.RecordFailure(n.ID)
+		} else {
+			d.table.RecordSuccess(n.ID)
+		}
+	}
 }
 
 // Bootstrap populates the routing table by contacting bootstrap nodes
@@ -370,8 +391,10 @@ func (d *DHT) GetPeers(ctx context.Context, infoHash [20]byte) ([]netip.AddrPort
 				defer wg.Done()
 				resp := d.sendGetPeers(ctx, n.Addr, infoHash)
 				if resp == nil {
+					d.table.RecordFailure(n.ID)
 					return
 				}
+				d.table.RecordSuccess(n.ID)
 
 				mu.Lock()
 				defer mu.Unlock()
@@ -467,8 +490,10 @@ func (d *DHT) Announce(ctx context.Context, infoHash [20]byte, port int) error {
 				defer wg.Done()
 				resp := d.sendGetPeers(ctx, n.Addr, infoHash)
 				if resp == nil {
+					d.table.RecordFailure(n.ID)
 					return
 				}
+				d.table.RecordSuccess(n.ID)
 
 				mu.Lock()
 				defer mu.Unlock()
@@ -659,8 +684,10 @@ func (d *DHT) iterativeFindNode(ctx context.Context, target nodeid.NodeID) []*ro
 				defer wg.Done()
 				resp := d.sendFindNode(ctx, n.Addr, target)
 				if resp == nil {
+					d.table.RecordFailure(n.ID)
 					return
 				}
+				d.table.RecordSuccess(n.ID)
 				if nodes, ok := resp.Response["nodes"]; ok {
 					parsed := parseCompactNodes(nodes)
 					mu.Lock()
@@ -696,6 +723,17 @@ func (d *DHT) iterativeFindNode(ctx context.Context, target nodeid.NodeID) []*ro
 }
 
 // --- Outgoing queries ---
+
+func (d *DHT) sendPing(ctx context.Context, addr netip.AddrPort) *krpc.Message {
+	msg := &krpc.Message{
+		Type:        "q",
+		QueryMethod: "ping",
+		Args: map[string]any{
+			"id": string(d.id[:]),
+		},
+	}
+	return d.sendQuery(ctx, msg, addr, "ping")
+}
 
 func (d *DHT) sendFindNode(ctx context.Context, addr netip.AddrPort, target nodeid.NodeID) *krpc.Message {
 	msg := &krpc.Message{
