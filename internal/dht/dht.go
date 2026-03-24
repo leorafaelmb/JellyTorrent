@@ -268,7 +268,11 @@ func (d *DHT) refreshTable() {
 // replaceIfDead pings the oldest node in a full bucket. If it doesn't
 // respond, evicts it and inserts the replacement. Called asynchronously
 // from handleQuery when a new node is rejected from a full bucket.
+// Skips the ping if the oldest node was seen recently (within refreshInterval).
 func (d *DHT) replaceIfDead(oldest, replacement *routing.Node) {
+	if time.Since(oldest.LastSeen) < refreshInterval {
+		return // incumbent is known alive, keep it
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
 	defer cancel()
 	resp := d.sendPing(ctx, oldest.Addr)
