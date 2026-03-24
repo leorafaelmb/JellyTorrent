@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	queryTimeout        = 5 * time.Second
+	queryTimeout        = 2 * time.Second
 	tokenRotateInterval = 5 * time.Minute
 	peerExpireInterval  = 5 * time.Minute
 	refreshInterval     = 15 * time.Minute
@@ -247,14 +247,35 @@ func (d *DHT) startMaintenance() {
 	}
 }
 
-// refreshTable performs a find_node lookup on a random target to keep
+// refreshTable performs find_node lookups targeting stale buckets to keep
 // the routing table populated, then sweeps stale nodes.
 func (d *DHT) refreshTable() {
-	target := nodeid.New() // random target
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	d.iterativeFindNode(ctx, target)
+	staleBuckets := d.table.StaleBuckets(refreshInterval)
+	if len(staleBuckets) == 0 {
+		d.sweepStaleNodes()
+		return
+	}
+	d.config.Logger.Debug("refreshing stale buckets", "count", len(staleBuckets))
+	for _, bucket := range staleBuckets {
+		target := d.table.TargetForBucket(bucket)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		d.iterativeFindNode(ctx, target)
+		cancel()
+	}
 	d.sweepStaleNodes()
+}
+
+// replaceIfDead pings the oldest node in a full bucket. If it doesn't
+// respond, evicts it and inserts the replacement. Called asynchronously
+// from handleQuery when a new node is rejected from a full bucket.
+func (d *DHT) replaceIfDead(oldest, replacement *routing.Node) {
+	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
+	defer cancel()
+	resp := d.sendPing(ctx, oldest.Addr)
+	if resp == nil {
+		d.table.Remove(oldest)
+		d.table.Insert(replacement)
+	}
 }
 
 // sweepStaleNodes pings all nodes that haven't responded recently and
@@ -868,12 +889,16 @@ func (d *DHT) handleQuery(msg *krpc.Message, addr netip.AddrPort) {
 		}
 	}
 
-	d.table.Insert(&routing.Node{
+	newNode := &routing.Node{
 		ID:        senderID,
 		Addr:      addr,
 		LastSeen:  time.Now(),
 		Compliant: compliant,
-	})
+	}
+	oldest, ok := d.table.Insert(newNode)
+	if !ok && oldest != nil {
+		go d.replaceIfDead(oldest, newNode)
+	}
 
 	d.config.Logger.Debug("query received",
 		"method", msg.QueryMethod,

@@ -1,6 +1,7 @@
 package routing
 
 import (
+	"crypto/rand"
 	"log/slog"
 	"net/netip"
 	"sort"
@@ -226,6 +227,53 @@ func (rt *RoutingTable) Stale(threshold time.Duration) []*Node {
 		}
 	}
 	return stale
+}
+
+// StaleBuckets returns the indices of non-empty buckets where all nodes
+// have a LastSeen older than the given threshold.
+func (rt *RoutingTable) StaleBuckets(threshold time.Duration) []int {
+	rt.mu.RLock()
+	defer rt.mu.RUnlock()
+	cutoff := time.Now().Add(-threshold)
+	var stale []int
+	for i, b := range rt.buckets {
+		nodes := b.Nodes()
+		if len(nodes) == 0 {
+			continue
+		}
+		allStale := true
+		for _, n := range nodes {
+			if n.LastSeen.After(cutoff) {
+				allStale = false
+				break
+			}
+		}
+		if allStale {
+			stale = append(stale, i)
+		}
+	}
+	return stale
+}
+
+// TargetForBucket generates a random node ID that falls in the given bucket
+// relative to this routing table's self ID (i.e., PrefixLen(self, target) == bucket).
+func (rt *RoutingTable) TargetForBucket(bucket int) nodeid.NodeID {
+	var target nodeid.NodeID
+	copy(target[:], rt.self[:])
+
+	// Flip the bit at position `bucket` to ensure XOR distance has a 1 there.
+	byteIdx := bucket / 8
+	bitIdx := uint(7 - (bucket % 8))
+	target[byteIdx] ^= 1 << bitIdx
+
+	// Randomize bytes after the target byte to avoid identical targets.
+	var rnd [20]byte
+	rand.Read(rnd[:])
+	for i := byteIdx + 1; i < 20; i++ {
+		target[i] = rt.self[i] ^ rnd[i]
+	}
+
+	return target
 }
 
 func (rt *RoutingTable) NumNodes() int {
