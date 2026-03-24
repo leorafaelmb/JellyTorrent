@@ -675,12 +675,19 @@ func (d *DHT) iterativeFindNode(ctx context.Context, target nodeid.NodeID) []*ro
 	copy(candidates, closest)
 
 	var rounds int
+	var prevClosest nodeid.NodeID
 	for rounds = 0; rounds < 10; rounds++ {
 		sort.Slice(candidates, func(i, j int) bool {
 			di := target.Distance(candidates[i].ID)
 			dj := target.Distance(candidates[j].ID)
 			return di.Less(dj)
 		})
+
+		// Check if the closest node improved since last round.
+		if rounds > 0 && candidates[0].ID == prevClosest {
+			break // converged — no closer nodes found
+		}
+		prevClosest = candidates[0].ID
 
 		var toQuery []*routing.Node
 		for _, c := range candidates {
