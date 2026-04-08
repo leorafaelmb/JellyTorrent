@@ -195,6 +195,31 @@ func TestBEP42HandleQueryEnforce(t *testing.T) {
 	}
 }
 
+func TestBEP42HandleQueryTableOnly(t *testing.T) {
+	a := newTestDHTWithBEP42(t, BEP42TableOnly)
+	defer a.Close()
+	b := newTestDHT(t) // B has a random (non-compliant) ID
+	defer b.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// B sends a query to A. In TableOnly mode, A should NOT insert B
+	// (non-compliant) but SHOULD respond (unlike Enforce).
+	b.config.BootstrapNodes = []string{localAddr(a)}
+	b.Bootstrap(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	// A should not have inserted B's non-compliant ID.
+	if a.table.NumNodes() != 0 {
+		t.Errorf("BEP42TableOnly: expected 0 nodes in A's table, got %d", a.table.NumNodes())
+	}
+	// B should have nodes — A responded to B's query (the key difference from Enforce).
+	if b.table.NumNodes() == 0 {
+		t.Error("BEP42TableOnly: B should have nodes — A should have responded to B's query")
+	}
+}
+
 func TestBEP42HandleQueryLog(t *testing.T) {
 	a := newTestDHTWithBEP42(t, BEP42Log)
 	defer a.Close()
@@ -283,7 +308,7 @@ func TestBEP42CompliantNodeEvictsNonCompliant(t *testing.T) {
 	}
 
 	// Create a routing table and fill a bucket with non-compliant nodes.
-	rt := routing.NewRoutingTable(compliantID, nil)
+	rt := routing.NewRoutingTable(compliantID, nil, nil)
 
 	// Find a bucket that we can fill. Insert nodes with non-compliant IDs
 	// that land in the same bucket.

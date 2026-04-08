@@ -16,15 +16,19 @@ func formatAddr(addr netip.AddrPort) string {
 }
 
 type RoutingTable struct {
-	self    nodeid.NodeID
-	buckets [160]*Bucket
-	mu      sync.RWMutex
-	logger  *slog.Logger
+	self        nodeid.NodeID
+	buckets     [160]*Bucket
+	mu          sync.RWMutex
+	logger      *slog.Logger
+	tableLogger *slog.Logger
 }
 
-func NewRoutingTable(self nodeid.NodeID, logger *slog.Logger) *RoutingTable {
+func NewRoutingTable(self nodeid.NodeID, logger *slog.Logger, tableLogger *slog.Logger) *RoutingTable {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if tableLogger == nil {
+		tableLogger = logger
 	}
 	buckets := [160]*Bucket{}
 
@@ -33,10 +37,11 @@ func NewRoutingTable(self nodeid.NodeID, logger *slog.Logger) *RoutingTable {
 	}
 
 	return &RoutingTable{
-		self:    self,
-		buckets: buckets,
-		mu:      sync.RWMutex{},
-		logger:  logger,
+		self:        self,
+		buckets:     buckets,
+		mu:          sync.RWMutex{},
+		logger:      logger,
+		tableLogger: tableLogger,
 	}
 
 }
@@ -58,25 +63,28 @@ func (rt *RoutingTable) Insert(node *Node) (*Node, bool) {
 		// without more info from the bucket, but compliant eviction is the interesting
 		// case and only happens when node.Compliant is true.
 		if node.Compliant {
-			rt.logger.Debug("routing table node evicted",
+			rt.tableLogger.Debug("routing table node evicted",
 				"new_id", node.ID.String(),
 				"new_addr", formatAddr(node.Addr),
 				"bucket", i,
+				"bucket_size", rt.buckets[i].Len(),
 				"table_size", tableSize,
 			)
 		}
 	} else if success && !wasFull {
-		rt.logger.Debug("routing table node added",
+		rt.tableLogger.Debug("routing table node added",
 			"node_id", node.ID.String(),
 			"addr", formatAddr(node.Addr),
 			"bucket", i,
+			"bucket_size", rt.buckets[i].Len(),
 			"table_size", tableSize,
 		)
 	} else if !success {
-		rt.logger.Debug("routing table insert rejected",
+		rt.tableLogger.Debug("routing table insert rejected",
 			"node_id", node.ID.String(),
 			"addr", formatAddr(node.Addr),
 			"bucket", i,
+			"bucket_size", rt.buckets[i].Len(),
 			"table_size", tableSize,
 		)
 	}
@@ -93,9 +101,10 @@ func (rt *RoutingTable) Remove(node *Node) bool {
 	ok := rt.buckets[i].Remove(node.ID)
 	rt.mu.Unlock()
 	if ok {
-		rt.logger.Debug("routing table node removed",
+		rt.tableLogger.Debug("routing table node removed",
 			"node_id", node.ID.String(),
 			"bucket", i,
+			"bucket_size", rt.buckets[i].Len(),
 		)
 	}
 	return ok
@@ -180,10 +189,11 @@ func (rt *RoutingTable) RecordFailure(id nodeid.NodeID) bool {
 			n.FailCount++
 			if n.FailCount >= MaxFailures {
 				rt.buckets[i].Remove(id)
-				rt.logger.Debug("stale node evicted",
+				rt.tableLogger.Debug("stale node evicted",
 					"node_id", id.String(),
 					"addr", formatAddr(n.Addr),
 					"bucket", i,
+					"bucket_size", rt.buckets[i].Len(),
 					"fail_count", n.FailCount,
 					"table_size", rt.countLocked(),
 				)

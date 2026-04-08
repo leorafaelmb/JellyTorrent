@@ -18,6 +18,7 @@ var (
 // are derived from the given IPv4 address via CRC32C. Bytes 3..18 are random,
 // and byte 19 stores the random byte used in the derivation.
 func GenerateCompliantID(ip netip.Addr) (nodeid.NodeID, error) {
+	ip = ip.Unmap()
 	if !ip.Is4() {
 		return nodeid.NodeID{}, fmt.Errorf("BEP 42: only IPv4 supported, got %s", ip)
 	}
@@ -46,6 +47,7 @@ func GenerateCompliantID(ip netip.Addr) (nodeid.NodeID, error) {
 // ValidateNodeID checks whether the first 21 bits of id match the CRC32C
 // derivation from ip per BEP 42. Returns false for non-IPv4 addresses.
 func ValidateNodeID(id nodeid.NodeID, ip netip.Addr) bool {
+	ip = ip.Unmap()
 	if !ip.Is4() {
 		return false
 	}

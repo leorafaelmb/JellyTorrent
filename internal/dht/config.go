@@ -1,18 +1,22 @@
 package dht
 
 import (
-	"github.com/leorafaelmb/JellyTorrent/internal/dht/routing"
+	"io"
 	"log/slog"
+	"net/netip"
 	"time"
+
+	"github.com/leorafaelmb/JellyTorrent/internal/dht/routing"
 )
 
 // BEP42Mode controls how BEP 42 node ID restrictions are enforced.
 type BEP42Mode int
 
 const (
-	BEP42Off     BEP42Mode = iota // No validation (default)
-	BEP42Log                      // Validate and log, insert all nodes
-	BEP42Enforce                  // Reject non-compliant nodes
+	BEP42Off       BEP42Mode = iota // No validation (default)
+	BEP42Log                        // Validate and log, insert all nodes
+	BEP42Enforce                    // Reject non-compliant nodes
+	BEP42TableOnly                  // Validate for table insertion, respond to all queries
 )
 
 type Config struct {
@@ -22,7 +26,9 @@ type Config struct {
 	K                int
 	PeerTTL          time.Duration
 	Logger           *slog.Logger
+	TableLogger      *slog.Logger
 	RoutingTablePath string
+	ExternalIP       netip.Addr
 	BEP42            BEP42Mode
 	RateLimit        int           // max queries per window per IP (0 = disabled)
 	RateLimitWin     time.Duration // rate limit window duration
@@ -41,6 +47,7 @@ func DefaultConfig() Config {
 		K:       routing.K,
 		PeerTTL: 30 * time.Minute,
 		Logger:       slog.Default(),
+		TableLogger:  slog.New(slog.NewJSONHandler(io.Discard, nil)),
 		RateLimit:    50,
 		RateLimitWin: 1 * time.Minute,
 	}
@@ -102,3 +109,16 @@ func WithRateLimit(limit int, window time.Duration) Option {
 		}
 	}
 }
+
+func WithExternalIP(ip netip.Addr) Option {
+	return func(c *Config) {
+		c.ExternalIP = ip
+	}
+}
+
+func WithTableLogger(l *slog.Logger) Option {
+	return func(c *Config) {
+		c.TableLogger = l
+	}
+}
+

@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,11 +20,13 @@ import (
 func main() {
 	port := flag.Int("port", 6881, "UDP port for DHT")
 	logPath := flag.String("log", "", "path to JSON log file (default: stderr)")
+	tableLogPath := flag.String("table-log", "", "path to routing table JSON log file (default: disabled)")
 	statePath := flag.String("state", "dht_state.dat", "path to routing table persistence file")
 	infohashFlag := flag.String("infohash", "", "comma-separated hex info hashes to announce")
 	rateLimit := flag.Int("ratelimit", 50, "max DHT queries per minute per IP (0 to disable)")
 	metricsPort := flag.Int("metrics-port", 0, "HTTP port for /metrics endpoint (0 to disable)")
-	bep42 := flag.String("bep42", "off", "BEP 42 node ID restriction mode: off, log, enforce")
+	bep42 := flag.String("bep42", "off", "BEP 42 node ID restriction mode: off, log, enforce, table")
+	externalIP := flag.String("external-ip", "", "external IPv4 address for BEP 42 compliant ID generation")
 	debug := flag.Bool("debug", false, "enable debug logging")
 	flag.Parse()
 
@@ -55,16 +58,31 @@ func main() {
 		bep42Mode = dht.BEP42Log
 	case "enforce":
 		bep42Mode = dht.BEP42Enforce
+	case "table":
+		bep42Mode = dht.BEP42TableOnly
 	}
 
-	d, err := dht.New(
+	opts := []dht.Option{
 		dht.WithPort(*port),
 		dht.WithLogger(logger),
 		dht.WithRoutingTable(*statePath),
 		dht.WithRateLimit(*rateLimit, 1*time.Minute),
 		dht.WithMetricsPort(*metricsPort),
 		dht.WithBEP42(bep42Mode),
-	)
+	}
+	if *externalIP != "" {
+		ip, err := netip.ParseAddr(*externalIP)
+		if err != nil {
+			logger.Error("invalid external IP", "error", err)
+			os.Exit(1)
+		}
+		opts = append(opts, dht.WithExternalIP(ip))
+	}
+	if *tableLogPath != "" {
+		tableLogger := setupLogger(*tableLogPath, *debug)
+		opts = append(opts, dht.WithTableLogger(tableLogger))
+	}
+	d, err := dht.New(opts...)
 	if err != nil {
 		logger.Error("failed to create DHT", "error", err)
 		os.Exit(1)

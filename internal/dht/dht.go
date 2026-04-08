@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -65,7 +67,16 @@ func New(opts ...Option) (*DHT, error) {
 		}
 	}
 
-	table := routing.NewRoutingTable(id, config.Logger)
+	// If no saved state provided an ID and BEP 42 is enabled with an external IP,
+	// generate a compliant node ID instead of using the random one.
+	if len(savedNodes) == 0 && config.BEP42 != BEP42Off && config.ExternalIP.IsValid() {
+		if compliantID, err := hardening.GenerateCompliantID(config.ExternalIP); err == nil {
+			id = compliantID
+			savedIP = config.ExternalIP
+		}
+	}
+
+	table := routing.NewRoutingTable(id, config.Logger, config.TableLogger)
 	for _, n := range savedNodes {
 		table.Insert(n)
 	}
@@ -79,15 +90,15 @@ func New(opts ...Option) (*DHT, error) {
 	}
 
 	d := &DHT{
-		id:          id,
-		table:       table,
-		tokens:      tokens,
-		peers:       peers,
-		config:      config,
-		stop:        make(chan struct{}),
-		ipVotes:     make(map[netip.Addr]int),
-		externalIP:  savedIP,
-		rateLimiter: rl,
+		id:            id,
+		table:         table,
+		tokens:        tokens,
+		peers:         peers,
+		config:        config,
+		stop:          make(chan struct{}),
+		ipVotes:       make(map[netip.Addr]int),
+		externalIP:    savedIP,
+		rateLimiter:   rl,
 	}
 
 	addr, err := netip.ParseAddrPort(fmt.Sprintf("0.0.0.0:%d", config.Port))
@@ -245,6 +256,7 @@ func (d *DHT) startMaintenance() {
 			}
 		}()
 	}
+
 }
 
 // refreshTable performs find_node lookups targeting stale buckets to keep
@@ -253,6 +265,7 @@ func (d *DHT) refreshTable() {
 	staleBuckets := d.table.StaleBuckets(refreshInterval)
 	if len(staleBuckets) == 0 {
 		d.sweepStaleNodes()
+		d.dumpRoutingTable()
 		return
 	}
 	d.config.Logger.Debug("refreshing stale buckets", "count", len(staleBuckets))
@@ -263,6 +276,29 @@ func (d *DHT) refreshTable() {
 		cancel()
 	}
 	d.sweepStaleNodes()
+	d.dumpRoutingTable()
+}
+
+func (d *DHT) dumpRoutingTable() {
+	nodes := d.table.Snapshot()
+	type nodeEntry struct {
+		ID     string `json:"id"`
+		Addr   string `json:"addr"`
+		Bucket int    `json:"bucket"`
+	}
+	entries := make([]nodeEntry, len(nodes))
+	for i, n := range nodes {
+		entries[i] = nodeEntry{
+			ID:     n.ID.String(),
+			Addr:   formatAddr(n.Addr),
+			Bucket: d.id.PrefixLen(n.ID),
+		}
+	}
+	encoded, _ := encodeJSON(entries)
+	d.config.TableLogger.Debug("routing table dump",
+		"table_size", len(nodes),
+		"nodes", encoded,
+	)
 }
 
 // replaceIfDead pings the oldest node in a full bucket. If it doesn't
@@ -270,7 +306,13 @@ func (d *DHT) refreshTable() {
 // from handleQuery when a new node is rejected from a full bucket.
 // Skips the ping if the oldest node was seen recently (within refreshInterval).
 func (d *DHT) replaceIfDead(oldest, replacement *routing.Node) {
+	bucket := d.id.PrefixLen(oldest.ID)
 	if time.Since(oldest.LastSeen) < refreshInterval {
+		d.config.TableLogger.Debug("routing table replace skipped",
+			"node_id", oldest.ID.String(),
+			"addr", formatAddr(oldest.Addr),
+			"bucket", bucket,
+		)
 		return // incumbent is known alive, keep it
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
@@ -279,6 +321,19 @@ func (d *DHT) replaceIfDead(oldest, replacement *routing.Node) {
 	if resp == nil {
 		d.table.Remove(oldest)
 		d.table.Insert(replacement)
+		d.config.TableLogger.Debug("routing table replace dead",
+			"old_id", oldest.ID.String(),
+			"old_addr", formatAddr(oldest.Addr),
+			"new_id", replacement.ID.String(),
+			"new_addr", formatAddr(replacement.Addr),
+			"bucket", bucket,
+		)
+	} else {
+		d.config.TableLogger.Debug("routing table incumbent alive",
+			"node_id", oldest.ID.String(),
+			"addr", formatAddr(oldest.Addr),
+			"bucket", bucket,
+		)
 	}
 }
 
@@ -290,12 +345,22 @@ func (d *DHT) sweepStaleNodes() {
 		return
 	}
 	d.config.Logger.Debug("stale node sweep started", "stale_count", len(stale))
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
 	for _, n := range stale {
+		ctx, cancel := context.WithTimeout(context.Background(), queryTimeout)
 		resp := d.sendPing(ctx, n.Addr)
+		cancel()
 		if resp == nil {
 			d.table.RecordFailure(n.ID)
+		} else if d.config.BEP42 == BEP42TableOnly && !hardening.ValidateNodeID(n.ID, n.Addr.Addr()) {
+			d.table.Remove(n)
+			d.config.TableLogger.Debug("stale node evicted",
+				"node_id", n.ID.String(),
+				"addr", formatAddr(n.Addr),
+				"bucket", d.id.PrefixLen(n.ID),
+				"bucket_size", 0,
+				"fail_count", 0,
+				"table_size", d.table.NumNodes(),
+			)
 		} else {
 			d.table.RecordSuccess(n.ID)
 		}
@@ -900,15 +965,17 @@ func (d *DHT) handleQuery(msg *krpc.Message, addr netip.AddrPort) {
 		}
 	}
 
-	newNode := &routing.Node{
-		ID:        senderID,
-		Addr:      addr,
-		LastSeen:  time.Now(),
-		Compliant: compliant,
-	}
-	oldest, ok := d.table.Insert(newNode)
-	if !ok && oldest != nil {
-		go d.replaceIfDead(oldest, newNode)
+	if d.config.BEP42 != BEP42TableOnly || compliant {
+		newNode := &routing.Node{
+			ID:        senderID,
+			Addr:      addr,
+			LastSeen:  time.Now(),
+			Compliant: compliant,
+		}
+		oldest, ok := d.table.Insert(newNode)
+		if !ok && oldest != nil {
+			go d.replaceIfDead(oldest, newNode)
+		}
 	}
 
 	d.config.Logger.Debug("query received",
@@ -933,6 +1000,7 @@ func (d *DHT) handleQuery(msg *krpc.Message, addr netip.AddrPort) {
 	case "announce_peer":
 		d.handleAnnouncePeer(msg, addr)
 	}
+
 }
 
 func (d *DHT) handlePing(msg *krpc.Message, addr netip.AddrPort) {
@@ -959,6 +1027,16 @@ func (d *DHT) handleFindNode(msg *krpc.Message, addr netip.AddrPort) {
 	)
 
 	closest := d.table.FindClosest(target, routing.K)
+
+	if d.id.PrefixLen(target) >= 15 && len(closest) > 0 {
+		d.config.TableLogger.Debug("closer nodes returned",
+			"query", "find_node",
+			"addr", formatAddr(addr),
+			"target", target.String(),
+			"target_bucket", d.id.PrefixLen(target),
+			"nodes", formatNodeIDs(closest),
+		)
+	}
 
 	resp := &krpc.Message{
 		TransactionID: msg.TransactionID,
@@ -1000,6 +1078,16 @@ func (d *DHT) handleGetPeers(msg *krpc.Message, addr netip.AddrPort) {
 	} else {
 		closest := d.table.FindClosest(nodeid.NodeID(infoHash), routing.K)
 		resp.Response["nodes"] = compactNodes(closest)
+
+		if d.id.PrefixLen(nodeid.NodeID(infoHash)) >= 15 && len(closest) > 0 {
+			d.config.TableLogger.Debug("closer nodes returned",
+				"query", "get_peers",
+				"addr", formatAddr(addr),
+				"info_hash", hex.EncodeToString(infoHash[:]),
+				"target_bucket", d.id.PrefixLen(nodeid.NodeID(infoHash)),
+				"nodes", formatNodeIDs(closest),
+			)
+		}
 	}
 
 	d.server.Reply(resp, addr)
@@ -1180,7 +1268,7 @@ func (d *DHT) regenerateCompliantID(ip netip.Addr) {
 
 	d.id = newID
 	d.externalIP = ip
-	d.table = routing.NewRoutingTable(newID, d.config.Logger)
+	d.table = routing.NewRoutingTable(newID, d.config.Logger, d.config.TableLogger)
 
 	// Re-insert existing nodes with BEP 42 validation.
 	for _, n := range nodes {
@@ -1202,6 +1290,20 @@ func (d *DHT) regenerateCompliantID(ip netip.Addr) {
 // addresses (e.g., "::ffff:1.2.3.4:6881" → "1.2.3.4:6881").
 func formatAddr(addr netip.AddrPort) string {
 	return netip.AddrPortFrom(addr.Addr().Unmap(), addr.Port()).String()
+}
+
+func encodeJSON(v any) (string, error) {
+	b, err := json.Marshal(v)
+	return string(b), err
+}
+
+// formatNodeIDs returns a comma-separated string of hex-encoded node IDs.
+func formatNodeIDs(nodes []*routing.Node) string {
+	ids := make([]string, len(nodes))
+	for i, n := range nodes {
+		ids[i] = n.ID.String()
+	}
+	return strings.Join(ids, ",")
 }
 
 // --- Compact encoding/decoding ---
